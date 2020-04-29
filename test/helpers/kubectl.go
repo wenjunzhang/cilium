@@ -1676,19 +1676,22 @@ func (kub *Kubectl) CiliumInstall(filename string, options map[string]string) er
 		return err
 	}
 
-	// Remove cilium DS to ensure that new instances of cilium-agent are started
-	// for the newly generated ConfigMap. Otherwise, the CM changes will stay
-	// inactive until each cilium-agent has been restarted.
-	if err := kub.DeleteCiliumDS(); err != nil {
-		return err
-	}
+	var (
+		wg                sync.WaitGroup
+		resourcesToDelete = map[string]string{
+			"cilium":          "daemonset",
+			"cilium-operator": "deployment",
+		}
+	)
 
-	// Remove cilium operator to ensure that new instances of cilium-operator are started
-	// for the newly generated ConfigMap. Otherwise, the CM changes will stay
-	// inactive until each cilium-operator has been restarted.
-	if err := kub.DeleteCiliumOperator(); err != nil {
-		return err
+	wg.Add(len(resourcesToDelete))
+	for resource, resourceType := range resourcesToDelete {
+		go func(resource, resourceType string) {
+			_ = kub.DeleteResource(resourceType, "-n "+GetCiliumNamespace(GetCurrentIntegration())+" "+resource)
+			wg.Done()
+		}(resource, resourceType)
 	}
+	wg.Wait()
 
 	res := kub.Apply(ApplyOptions{FilePath: filename, Force: true, Namespace: GetCiliumNamespace(GetCurrentIntegration())})
 	if !res.WasSuccessful() {
