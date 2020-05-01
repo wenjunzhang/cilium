@@ -333,27 +333,14 @@ function write_cilium_cfg() {
         cilium_options+=" --kvstore consul"
         cilium_operator_options+=" --kvstore consul"
     fi
-    # container runtime options
-    case "${RUNTIME}" in
-        "containerd" | "containerD")
-            cilium_options+=" --container-runtime=containerd --container-runtime-endpoint=containerd=/var/run/containerd/containerd.sock"
-            cat <<EOF >> "$filename"
-sed -i '4s+.*++' /lib/systemd/system/cilium.service
-EOF
-            ;;
-        "crio" | "cri-o")
-            cilium_options+=" --container-runtime=crio --container-runtime-endpoint=crio=/var/run/crio/crio.sock"
-            ;;
-        *)
-            cilium_options+=" --container-runtime=docker --container-runtime-endpoint=docker=unix:///var/run/docker.sock"
-            ;;
-    esac
 
     cilium_options+=" ${TUNNEL_MODE_STRING}"
 
 cat <<EOF >> "$filename"
 sleep 2s
-echo "K8S_NODE_NAME=\$(hostname)" >> /etc/sysconfig/cilium
+if [ -n "\${K8S}" ]; then
+    echo "K8S_NODE_NAME=\$(hostname)" >> /etc/sysconfig/cilium
+fi
 echo 'CILIUM_OPTS="${cilium_options}"' >> /etc/sysconfig/cilium
 echo 'CILIUM_OPERATOR_OPTS="${cilium_operator_options}"' >> /etc/sysconfig/cilium
 echo 'PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin' >> /etc/sysconfig/cilium

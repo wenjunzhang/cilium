@@ -30,8 +30,8 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/serializer"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/sirupsen/logrus"
-	"gopkg.in/fsnotify.v1"
 )
 
 const templateWatcherQueueSize = 10
@@ -57,6 +57,7 @@ var ignoredELFPrefixes = []string{
 	"cilium_snat",                // All SNAT maps
 	"cilium_tunnel",              // Global
 	"cilium_ipv4_frag_datagrams", // Global
+	"cilium_ipmasq",              // Global
 	"from-container",             // Prog name
 	"to-container",               // Prog name
 	// Endpoint IPv6 address. It's possible for the template object to have

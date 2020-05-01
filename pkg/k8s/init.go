@@ -23,11 +23,12 @@ import (
 
 	"github.com/cilium/cilium/pkg/backoff"
 	"github.com/cilium/cilium/pkg/controller"
-	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	cilium_v2_client "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2/client"
 	"github.com/cilium/cilium/pkg/k8s/types"
 	k8sversion "github.com/cilium/cilium/pkg/k8s/version"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
+	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
 
@@ -39,7 +40,7 @@ const (
 	nodeRetrievalMaxRetries = 15
 )
 
-func waitForNodeInformation(ctx context.Context, nodeName string) *node.Node {
+func waitForNodeInformation(ctx context.Context, nodeName string) *nodeTypes.Node {
 	backoff := backoff.Exponential{
 		Min:    time.Duration(200) * time.Millisecond,
 		Factor: 2.0,
@@ -60,7 +61,7 @@ func waitForNodeInformation(ctx context.Context, nodeName string) *node.Node {
 	return nil
 }
 
-func retrieveNodeInformation(nodeName string) (*node.Node, error) {
+func retrieveNodeInformation(nodeName string) (*nodeTypes.Node, error) {
 	requireIPv4CIDR := option.Config.K8sRequireIPv4PodCIDR
 	requireIPv6CIDR := option.Config.K8sRequireIPv6PodCIDR
 
@@ -102,7 +103,7 @@ func retrieveNodeInformation(nodeName string) (*node.Node, error) {
 
 // useNodeCIDR sets the ipv4-range and ipv6-range values values from the
 // addresses defined in the given node.
-func useNodeCIDR(n *node.Node) {
+func useNodeCIDR(n *nodeTypes.Node) {
 	if n.IPv4AllocCIDR != nil && option.Config.EnableIPv4 {
 		node.SetIPv4AllocRange(n.IPv4AllocCIDR)
 	}
@@ -163,7 +164,7 @@ func Init() error {
 	if nodeName := os.Getenv(EnvNodeNameSpec); nodeName != "" {
 		// Use of the environment variable overwrites the node-name
 		// automatically derived
-		node.SetName(nodeName)
+		nodeTypes.SetName(nodeName)
 
 		if n := waitForNodeInformation(context.TODO(), nodeName); n != nil {
 			nodeIP4 := n.GetNodeIP(false)
@@ -225,7 +226,7 @@ func RegisterCRDs() error {
 		return fmt.Errorf("Unable to create rest configuration for k8s CRD: %s", err)
 	}
 
-	err = cilium_v2.CreateCustomResourceDefinitions(apiextensionsclientset)
+	err = cilium_v2_client.CreateCustomResourceDefinitions(apiextensionsclientset)
 	if err != nil {
 		return fmt.Errorf("Unable to create custom resource definition: %s", err)
 	}

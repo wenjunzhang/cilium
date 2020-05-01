@@ -119,13 +119,25 @@ global:
   # disabled.
   installIptablesRules: true
 
-  # masquerade enables masquerading of traffic leaving the ndoe for
+  # masquerade enables masquerading of traffic leaving the node for
   # destinations outside of the cluster.
   masquerade: true
+
+  # bpfMasquerade enables masquerading with BPF instead of iptables
+  bpfMasquerade: false
+
+  # ipMasqAgent enables and controls BPF ip-masq-agent
+  ipMasqAgent:
+    enabled: false
+    syncPeriod: 60s
 
   # autoDirectNodeRoutes enables installation of PodCIDR routes between worker
   # nodes if worker nodes share a common L2 network segment.
   autoDirectNodeRoutes: false
+
+  # nativeRoutingCIDR allows to explicitly specify the CIDR for native routing. This
+  # value corresponds to the configured cluster-cidr.
+  nativeRoutingCIDR: ""
 
   # endpointRoutes enables use of per endpoint routes instead of routing vis
   # the cilium_host interface
@@ -224,7 +236,14 @@ global:
     # natMax is the maximum number of entries for the NAT table
     natMax: 524288
 
-    # montiorAggregation is the level of aggregation for datapath trace events
+    # mapDynamicSizeRatio is the ratio (0.0-1.0) of total system memory to use
+    # for dynamic sizing of CT, NAT and policy BPF maps. If set to 0.0, dynamic
+    # sizing of BPF maps is disabled. The default value of 0.03 (3%) leads to
+    # approximately the default BPF map sizes on a node with 4 GiB of total
+    # system memory.
+    mapDynamicSizeRatio: 0.03
+
+    # monitorAggregation is the level of aggregation for datapath trace events
     monitorAggregation: medium
 
     # monitorInterval is the typical time between monitor notifications for
@@ -280,10 +299,14 @@ global:
     # device:
 
     # mode is the mode of NodePort feature
-    mode: "hybrid"
+    # mode:
 
     # acceleration is the option to accelerate NodePort via XDP
-    acceleration: "none"
+    # acceleration:
+
+    # bindProtection is the option to enable or disable prevention of
+    # applications binding to service ports
+    bindProtection: true
 
     # Append NodePort range to ip_local_reserved_ports if clash with ephemeral
     # ports is detected
@@ -298,6 +321,10 @@ global:
   externalIPs:
     # enabled enables ExternalIPs functionality
     enabled: false
+
+  # sessionAffinity enable support for service sessionAffinity
+  sessionAffinity:
+    enabled: true
 
   # flannel is the flannel specific configuration
   flannel:
@@ -341,6 +368,10 @@ global:
 
   # ENI mode configures the options required to run with ENI
   eni: false
+
+  # Google Kubernetes Engine
+  gke:
+    enabled: false
 
   azure:
     enabled: false
@@ -397,6 +428,8 @@ global:
   # hubble configures Hubble.
   hubble:
     enabled: false
+    ui:
+      enabled: false 
     # Default unix domain socket path to listen to when Hubble is enabled. Default to "/var/run/cilium/hubble.sock".
     socketPath: /var/run/cilium/hubble.sock
     # List of additional addresses to listen to, for example:
@@ -434,7 +467,14 @@ global:
     #
     # See https://github.com/cilium/hubble/blob/master/Documentation/metrics.md for more comprehensive
     # documentation about Hubble's metric collection.
-    metrics: []
+    metrics:
+      enabled:
+       - drop
+      serviceMonitor:
+        enabled: false
+    # Configures the hubble-cli subchart
+    cli:
+      enabled: false
 
   # CI specific options: DO NOT USE IN PRODUCTION.
   ci:

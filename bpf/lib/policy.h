@@ -88,7 +88,7 @@ __policy_can_access(const void *map, struct __ctx_buff *ctx, __u32 identity,
 	// of ICMP type 3 code 4 - Fragmentation Needed
 	if (proto == IPPROTO_ICMP) {
 		void *data, *data_end;
-		struct icmphdr icmphdr;
+		struct icmphdr icmphdr __align_stack_8;
 		struct iphdr *ip4;
 
 		if (!revalidate_data(ctx, &data, &data_end, &ip4))
@@ -241,14 +241,14 @@ policy_can_egress(struct __ctx_buff *ctx, __u32 identity, __u16 dport, __u8 prot
 }
 
 static __always_inline int policy_can_egress6(struct __ctx_buff *ctx,
-					      struct ipv6_ct_tuple *tuple,
+					      const struct ipv6_ct_tuple *tuple,
 					      __u32 identity, __u8 *match_type)
 {
 	return policy_can_egress(ctx, identity, tuple->dport, tuple->nexthdr, match_type);
 }
 
 static __always_inline int policy_can_egress4(struct __ctx_buff *ctx,
-					      struct ipv4_ct_tuple *tuple,
+					      const struct ipv4_ct_tuple *tuple,
 					      __u32 identity, __u8 *match_type)
 {
 	return policy_can_egress(ctx, identity, tuple->dport, tuple->nexthdr, match_type);

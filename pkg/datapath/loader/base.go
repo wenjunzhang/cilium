@@ -49,13 +49,13 @@ const (
 	initArgXDPMode
 	initArgMTU
 	initArgIPSec
-	initArgMasquerade
 	initArgEncryptInterface
 	initArgHostReachableServices
 	initArgHostReachableServicesUDP
 	initArgCgroupRoot
 	initArgBpffsRoot
 	initArgNodePort
+	initArgNodePortBind
 	initBPFCPU
 	initArgMax
 )
@@ -187,12 +187,6 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 		args[initArgIPSec] = "false"
 	}
 
-	if !option.Config.InstallIptRules && option.Config.Masquerade {
-		args[initArgMasquerade] = "true"
-	} else {
-		args[initArgMasquerade] = "false"
-	}
-
 	if option.Config.EnableHostReachableServices {
 		args[initArgHostReachableServices] = "true"
 		if option.Config.EnableHostServicesUDP {
@@ -248,6 +242,12 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 		args[initArgNodePort] = "true"
 	} else {
 		args[initArgNodePort] = "false"
+	}
+
+	if option.Config.NodePortBindProtection {
+		args[initArgNodePortBind] = "true"
+	} else {
+		args[initArgNodePortBind] = "false"
 	}
 
 	args[initBPFCPU] = GetBPFCPU()

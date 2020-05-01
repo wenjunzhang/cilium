@@ -36,6 +36,8 @@ import (
 	"github.com/cilium/cilium/pkg/maps/eventsmap"
 	"github.com/cilium/cilium/pkg/maps/fragmap"
 	ipcachemap "github.com/cilium/cilium/pkg/maps/ipcache"
+	"github.com/cilium/cilium/pkg/maps/ipmasq"
+	"github.com/cilium/cilium/pkg/maps/lbmap"
 	"github.com/cilium/cilium/pkg/maps/lxcmap"
 	"github.com/cilium/cilium/pkg/maps/metricsmap"
 	"github.com/cilium/cilium/pkg/maps/nat"
@@ -405,7 +407,7 @@ func (d *Daemon) initMaps() error {
 	}
 
 	if option.Config.EnableIPv4FragmentsTracking {
-		if err := fragmap.InitMap(); err != nil {
+		if err := fragmap.InitMap(option.Config.FragmentsMapEntries); err != nil {
 			return err
 		}
 	}
@@ -416,6 +418,12 @@ func (d *Daemon) initMaps() error {
 	ipcache.IPIdentityCache.SetListeners([]ipcache.IPIdentityMappingListener{
 		datapathIpcache.NewListener(d, d),
 	})
+
+	if option.Config.EnableIPv4 && option.Config.EnableIPMasqAgent {
+		if _, err := ipmasq.IPMasq4Map.OpenOrCreate(); err != nil {
+			return err
+		}
+	}
 
 	// Start the controller for periodic sync of the metrics map with
 	// the prometheus server.
@@ -430,6 +438,22 @@ func (d *Daemon) initMaps() error {
 		// If we are not restoring state, all endpoints can be
 		// deleted. Entries will be re-populated.
 		lxcmap.LXCMap.DeleteAll()
+	}
+
+	if option.Config.EnableSessionAffinity {
+		if _, err := lbmap.AffinityMatchMap.OpenOrCreate(); err != nil {
+			return err
+		}
+		if option.Config.EnableIPv4 {
+			if _, err := lbmap.Affinity4Map.OpenOrCreate(); err != nil {
+				return err
+			}
+		}
+		if option.Config.EnableIPv6 {
+			if _, err := lbmap.Affinity6Map.OpenOrCreate(); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil

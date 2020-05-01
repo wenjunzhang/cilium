@@ -131,10 +131,12 @@ static __always_inline int handle_ipv6(struct __ctx_buff *ctx,
 		return DROP_INVALID;
 
 #ifdef ENABLE_NODEPORT
-	if (!bpf_skip_nodeport(ctx)) {
-		ret = nodeport_lb6(ctx, srcid_from_proxy);
-		if (ret < 0)
-			return ret;
+	if (ctx_get_xfer(ctx) != XFER_PKT_NO_SVC) {
+		if (!bpf_skip_nodeport(ctx)) {
+			ret = nodeport_lb6(ctx, srcid_from_proxy);
+			if (ret < 0)
+				return ret;
+		}
 	}
 #if defined(ENCAP_IFINDEX) || defined(NO_REDIRECT)
 	/* See IPv4 case for NO_REDIRECT comments */
@@ -260,7 +262,7 @@ int tail_handle_ipv6(struct __ctx_buff *ctx)
 
 #ifdef ENABLE_IPV4
 static __always_inline __u32
-resolve_srcid_ipv4(struct __ctx_buff *ctx, struct iphdr *ip4,
+resolve_srcid_ipv4(struct __ctx_buff *ctx, const struct iphdr *ip4,
 		   __u32 srcid_from_proxy)
 {
 	__u32 src_id = WORLD_ID, srcid_from_ipcache = srcid_from_proxy;
@@ -319,10 +321,12 @@ static __always_inline int handle_ipv4(struct __ctx_buff *ctx,
 		return DROP_INVALID;
 
 #ifdef ENABLE_NODEPORT
-	if (!bpf_skip_nodeport(ctx)) {
-		int ret = nodeport_lb4(ctx, srcid_from_proxy);
-		if (ret < 0)
-			return ret;
+	if (ctx_get_xfer(ctx) != XFER_PKT_NO_SVC) {
+		if (!bpf_skip_nodeport(ctx)) {
+			int ret = nodeport_lb4(ctx, srcid_from_proxy);
+			if (ret < 0)
+				return ret;
+		}
 	}
 #if defined(ENCAP_IFINDEX) || defined(NO_REDIRECT)
 	/* We cannot redirect a packet to a local endpoint in the direct
@@ -445,7 +449,8 @@ int tail_handle_ipv4(struct __ctx_buff *ctx)
 
 	ret = handle_ipv4(ctx, proxy_identity);
 	if (IS_ERR(ret))
-		return send_drop_notify_error(ctx, proxy_identity, ret, CTX_ACT_DROP, METRIC_INGRESS);
+		return send_drop_notify_error(ctx, proxy_identity,
+					      ret, CTX_ACT_DROP, METRIC_INGRESS);
 	return ret;
 }
 
@@ -690,15 +695,6 @@ int from_netdev(struct __ctx_buff *ctx)
 		/* Pass unknown traffic to the stack */
 		return CTX_ACT_OK;
 
-#ifdef ENABLE_MASQUERADE
-	cilium_dbg_capture(ctx, DBG_CAPTURE_SNAT_PRE, ctx_get_ifindex(ctx));
-	ret = snat_process(ctx, BPF_PKT_DIR);
-	if (ret != CTX_ACT_OK) {
-		return ret;
-	}
-	cilium_dbg_capture(ctx, DBG_CAPTURE_SNAT_POST, ctx_get_ifindex(ctx));
-#endif /* ENABLE_MASQUERADE */
-
 	return do_netdev(ctx, proto);
 }
 
@@ -717,16 +713,7 @@ int to_netdev(struct __ctx_buff *ctx __maybe_unused)
 	ret = nodeport_nat_fwd(ctx, false);
 	if (IS_ERR(ret))
 		return send_drop_notify_error(ctx, 0, ret, CTX_ACT_DROP, METRIC_EGRESS);
-#elif defined(ENABLE_MASQUERADE)
-	__u16 proto;
-	if (!validate_ethertype(ctx, &proto))
-		/* Pass unknown traffic to the stack */
-		return CTX_ACT_OK;
-	cilium_dbg_capture(ctx, DBG_CAPTURE_SNAT_PRE, ctx_get_ifindex(ctx));
-	ret = snat_process(ctx, BPF_PKT_DIR);
-	if (!ret)
-		cilium_dbg_capture(ctx, DBG_CAPTURE_SNAT_POST, ctx_get_ifindex(ctx));
-#endif /* ENABLE_MASQUERADE */
+#endif
 	return ret;
 }
 

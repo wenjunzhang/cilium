@@ -36,6 +36,7 @@ import (
 	"github.com/cilium/cilium/pkg/maps/eventsmap"
 	"github.com/cilium/cilium/pkg/maps/fragmap"
 	ipcachemap "github.com/cilium/cilium/pkg/maps/ipcache"
+	"github.com/cilium/cilium/pkg/maps/ipmasq"
 	"github.com/cilium/cilium/pkg/maps/lbmap"
 	"github.com/cilium/cilium/pkg/maps/lxcmap"
 	"github.com/cilium/cilium/pkg/maps/metricsmap"
@@ -114,7 +115,7 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 		if option.Config.EnableIPv4FragmentsTracking {
 			cDefinesMap["ENABLE_IPV4_FRAGMENTS"] = "1"
 			cDefinesMap["IPV4_FRAG_DATAGRAMS_MAP"] = fragmap.MapName
-			cDefinesMap["CILIUM_IPV4_FRAG_MAP_MAX_ENTRIES"] = fmt.Sprintf("%d", fragmap.MaxEntries)
+			cDefinesMap["CILIUM_IPV4_FRAG_MAP_MAX_ENTRIES"] = fmt.Sprintf("%d", option.Config.FragmentsMapEntries)
 		}
 	}
 
@@ -178,6 +179,17 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 	cDefinesMap["LB4_REVERSE_NAT_SK_MAP"] = lbmap.SockRevNat4MapName
 	cDefinesMap["LB4_REVERSE_NAT_SK_MAP_SIZE"] = fmt.Sprintf("%d", lbmap.SockRevNat4MapSize)
 
+	if option.Config.EnableSessionAffinity {
+		cDefinesMap["ENABLE_SESSION_AFFINITY"] = "1"
+		cDefinesMap["LB_AFFINITY_MATCH_MAP"] = lbmap.AffinityMatchMapName
+		if option.Config.EnableIPv4 {
+			cDefinesMap["LB4_AFFINITY_MAP"] = lbmap.Affinity4MapName
+		}
+		if option.Config.EnableIPv6 {
+			cDefinesMap["LB6_AFFINITY_MAP"] = lbmap.Affinity6MapName
+		}
+	}
+
 	cDefinesMap["TRACE_PAYLOAD_LEN"] = fmt.Sprintf("%dULL", option.Config.TracePayloadlen)
 	cDefinesMap["MTU"] = fmt.Sprintf("%d", cfg.MtuConfig.GetDeviceMTU())
 
@@ -199,6 +211,10 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 
 	if option.Config.EncryptNode {
 		cDefinesMap["ENCRYPT_NODE"] = "1"
+	}
+
+	if option.Config.DevicePreFilter != "undefined" {
+		cDefinesMap["ENABLE_PREFILTER"] = "1"
 	}
 
 	if !option.Config.DisableK8sServices {
@@ -264,8 +280,7 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 	if option.Config.IsPodSubnetsDefined() {
 		cDefinesMap["IP_POOLS"] = "1"
 	}
-	haveMasquerade := !option.Config.InstallIptRules && option.Config.Masquerade
-	if haveMasquerade || option.Config.EnableNodePort {
+	if option.Config.EnableNodePort {
 		if option.Config.EnableIPv4 {
 			cDefinesMap["SNAT_MAPPING_IPV4"] = nat.MapNameSnat4Global
 			cDefinesMap["SNAT_MAPPING_IPV4_SIZE"] = fmt.Sprintf("%d", option.Config.NATMapEntriesGlobal)
@@ -275,25 +290,16 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 			cDefinesMap["SNAT_MAPPING_IPV6"] = nat.MapNameSnat6Global
 			cDefinesMap["SNAT_MAPPING_IPV6_SIZE"] = fmt.Sprintf("%d", option.Config.NATMapEntriesGlobal)
 		}
-	}
-	if haveMasquerade {
-		cDefinesMap["ENABLE_MASQUERADE"] = "1"
-		cDefinesMap["SNAT_MAPPING_MIN_PORT"] = fmt.Sprintf("%d", nat.MinPortSnatDefault)
-		cDefinesMap["SNAT_MAPPING_MAX_PORT"] = fmt.Sprintf("%d", nat.MaxPortSnatDefault)
 
-		// SNAT_DIRECTION is defined by init.sh
-		if option.Config.EnableIPv4 {
-			ipv4Addr := node.GetExternalIPv4()
-			cDefinesMap["SNAT_IPV4_EXTERNAL"] = fmt.Sprintf("%#x", byteorder.HostSliceToNetwork(ipv4Addr, reflect.Uint32).(uint32))
+		if option.Config.EnableBPFMasquerade {
+			cDefinesMap["ENABLE_MASQUERADE"] = "1"
 		}
 
-		if option.Config.EnableIPv6 {
-			extraMacrosMap["SNAT_IPV6_EXTERNAL"] = hostIP.String()
-			fw.WriteString(defineIPv6("SNAT_IPV6_EXTERNAL", hostIP))
+		if option.Config.EnableIPMasqAgent {
+			cDefinesMap["ENABLE_IP_MASQ_AGENT"] = "1"
+			cDefinesMap["IP_MASQ_AGENT_IPV4"] = ipmasq.MapName
 		}
-	}
 
-	if (!option.Config.InstallIptRules && option.Config.Masquerade) || option.Config.EnableNodePort {
 		ctmap.WriteBPFMacros(fw, nil)
 	}
 

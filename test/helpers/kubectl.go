@@ -101,6 +101,10 @@ var (
 		"global.ipv6.enabled":                 "true",
 		"global.psp.enabled":                  "true",
 		"global.ci.kubeCacheMutationDetector": "true",
+		// Disable by default, so that 4.9 CI build does not panic due to
+		// missing LRU support. On 4.19 and net-next we enable it with
+		// kubeProxyReplacement=strict.
+		"global.sessionAffinity.enabled": "false",
 	}
 
 	flannelHelmOverrides = map[string]string{
@@ -123,6 +127,9 @@ var (
 		"nodeinit.reconfigureKubelet": "true",
 		"nodeinit.removeCbrBridge":    "true",
 		"global.cni.binPath":          "/home/kubernetes/bin",
+		"global.nodePort.mode":        "snat",
+		"global.gke.enabled":          "true",
+		"global.nativeRoutingCIDR":    "10.0.0.0/8",
 	}
 
 	microk8sHelmOverrides = map[string]string{
@@ -157,6 +164,14 @@ func HelmOverride(option string) string {
 		return overrides[option]
 	}
 	return ""
+}
+
+// NativeRoutingEnabled returns true when native routing is enabled for a
+// particular CNI_INTEGRATION
+func NativeRoutingEnabled() bool {
+	tunnelDisabled := HelmOverride("global.tunnel") == "disabled"
+	gkeEnabled := HelmOverride("global.gke.enabled") == "true"
+	return tunnelDisabled || gkeEnabled
 }
 
 func init() {
@@ -288,18 +303,91 @@ func CreateKubectl(vmName string, log *logrus.Entry) (k *Kubectl) {
 	return k
 }
 
-// LabelNodes labels nodes in vagrant env. If you are running tests on different cluster you need to label your nodes by yourself
-func (kub *Kubectl) LabelNodes() {
-	kub.ExecMiddle(fmt.Sprintf("%s label --overwrite node k8s1 cilium.io/ci-node=k8s1", KubectlCmd))
-	kub.ExecMiddle(fmt.Sprintf("%s label --overwrite node k8s2 cilium.io/ci-node=k8s2", KubectlCmd))
-	kub.ExecMiddle(fmt.Sprintf("%s label --overwrite node k8s3 cilium.io/ci-node=k8s3", KubectlCmd))
+// DeleteAllInNamespace deletes all namespaces except the ones provided in the
+// exception list
+func (kub *Kubectl) DeleteAllNamespacesExcept(except []string) error {
+	cmd := KubectlCmd + " get namespace -o json | jq -r '[ .items[].metadata.name ]'"
+	res := kub.ExecShort(cmd)
+	if !res.WasSuccessful() {
+		return fmt.Errorf("unable to retrieve all namespaces with '%s': %s", cmd, res.OutputPrettyPrint())
+	}
+
+	var namespaceList []string
+	if err := res.Unmarshal(&namespaceList); err != nil {
+		return fmt.Errorf("unable to unmarshal string slice '%#v': %s", namespaceList, err)
+	}
+
+	exceptMap := map[string]struct{}{}
+	for _, e := range except {
+		exceptMap[e] = struct{}{}
+	}
+
+	for _, namespace := range namespaceList {
+		if _, ok := exceptMap[namespace]; !ok {
+			kub.NamespaceDelete(namespace)
+		}
+	}
+
+	return nil
+}
+
+// PrepareCluster will prepare the cluster to run tests. It will:
+// - Delete all existing namespaces
+// - Label all nodes so the tests can use them
+func (kub *Kubectl) PrepareCluster() {
+	ginkgoext.By("Preparing cluster")
+	err := kub.DeleteAllNamespacesExcept([]string{
+		KubeSystemNamespace,
+		GetCiliumNamespace(GetCurrentIntegration()),
+		"default",
+		"kube-node-lease",
+		"kube-public",
+	})
+	if err != nil {
+		ginkgoext.Failf("Unable to delete non-essential namespaces: %s", err)
+	}
+
+	ginkgoext.By("Labelling nodes")
+	if err = kub.labelNodes(); err != nil {
+		ginkgoext.Failf("unable label nodes: %s", err)
+	}
+}
+
+// labelNodes labels all Kubernetes nodes for use by the CI tests
+func (kub *Kubectl) labelNodes() error {
+	cmd := KubectlCmd + " get nodes -o json | jq -r '[ .items[].metadata.name ]'"
+	res := kub.ExecShort(cmd)
+	if !res.WasSuccessful() {
+		return fmt.Errorf("unable to retrieve all nodes with '%s': %s", cmd, res.OutputPrettyPrint())
+	}
+
+	var nodesList []string
+	if err := res.Unmarshal(&nodesList); err != nil {
+		return fmt.Errorf("unable to unmarshal string slice '%#v': %s", nodesList, err)
+	}
+
+	index := 1
+	for _, nodeName := range nodesList {
+		cmd := fmt.Sprintf("%s label --overwrite node %s cilium.io/ci-node=k8s%d", KubectlCmd, nodeName, index)
+		res := kub.ExecShort(cmd)
+		if !res.WasSuccessful() {
+			return fmt.Errorf("unable to label node with '%s': %s", cmd, res.OutputPrettyPrint())
+		}
+		index++
+	}
 
 	node := GetNodeWithoutCilium()
 	if node != "" {
 		// Prevent scheduling any pods on the node, as it will be used as an external client
 		// to send requests to k8s{1,2}
-		kub.ExecMiddle(fmt.Sprintf("%s taint nodes %s key=value:NoSchedule", KubectlCmd, node))
+		cmd := fmt.Sprintf("%s taint --overwrite nodes %s key=value:NoSchedule", KubectlCmd, node)
+		res := kub.ExecMiddle(cmd)
+		if !res.WasSuccessful() {
+			return fmt.Errorf("unable to taint node with '%s': %s", cmd, res.OutputPrettyPrint())
+		}
 	}
+
+	return nil
 }
 
 // CepGet returns the endpoint model for the given pod name in the specified
@@ -867,11 +955,10 @@ func (kub *Kubectl) NamespaceCreate(name string) *CmdRes {
 // NamespaceDelete deletes a given Kubernetes namespace
 func (kub *Kubectl) NamespaceDelete(name string) *CmdRes {
 	ginkgoext.By("Deleting namespace %s", name)
-	res := kub.DeleteAllInNamespace(name)
-	if !res.WasSuccessful() {
-		kub.Logger().Infof("Error while deleting all objects from %s ns: %s", name, res.GetError())
+	if err := kub.DeleteAllInNamespace(name); err != nil {
+		kub.Logger().Infof("Error while deleting all objects from %s ns: %s", name, err)
 	}
-	res = kub.ExecShort(fmt.Sprintf("%s delete namespace %s", KubectlCmd, name))
+	res := kub.ExecShort(fmt.Sprintf("%s delete namespace %s", KubectlCmd, name))
 	if !res.WasSuccessful() {
 		kub.Logger().Infof("Error while deleting ns %s: %s", name, res.GetError())
 	}
@@ -881,10 +968,14 @@ func (kub *Kubectl) NamespaceDelete(name string) *CmdRes {
 }
 
 // DeleteAllInNamespace deletes all k8s objects in a namespace
-func (kub *Kubectl) DeleteAllInNamespace(name string) *CmdRes {
+func (kub *Kubectl) DeleteAllInNamespace(name string) error {
 	// we are getting all namespaced resources from k8s apiserver, and delete all objects of these types in a provided namespace
-	return kub.ExecShort(fmt.Sprintf("%s delete $(%s api-resources --namespaced=true --verbs=delete -o name | tr '\n' ',' | sed -e 's/,$//') -n %s --all",
-		KubectlCmd, KubectlCmd, name))
+	cmd := fmt.Sprintf("%s delete $(%s api-resources --namespaced=true --verbs=delete -o name | tr '\n' ',' | sed -e 's/,$//') -n %s --all", KubectlCmd, KubectlCmd, name)
+	if res := kub.ExecShort(cmd); !res.WasSuccessful() {
+		return fmt.Errorf("unable to run '%s': %s", cmd, res.OutputPrettyPrint())
+	}
+
+	return nil
 }
 
 // NamespaceLabel sets a label in a Kubernetes namespace
@@ -1999,6 +2090,30 @@ func (kub *Kubectl) WaitPolicyDeleted(pod string, policyName string) error {
 	}
 
 	return WithTimeout(body, fmt.Sprintf("Policy %s was not deleted in time", policyName), &TimeoutConfig{Timeout: HelperTimeout})
+}
+
+// WaitForCiliumEndpointDeleted waits until the given pod is removed from
+// the cilium endpoint list on the given node.
+func (kub *Kubectl) WaitForCiliumEndpointDeleted(node, namespace, pod string) error {
+	ciliumPod, err := kub.GetCiliumPodOnNode(namespace, node)
+	if err != nil {
+		return err
+	}
+
+	body := func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), ShortCommandTimeout)
+		defer cancel()
+		cmd := fmt.Sprintf(
+			`cilium endpoint list -o json | jq -r '.[] | select (.status."external-identifiers"."pod-name" == "%s/%s")'`,
+			namespace, pod)
+		res := kub.CiliumExecContext(ctx, ciliumPod, cmd)
+		return !res.WasSuccessful()
+	}
+
+	return WithTimeout(body,
+		fmt.Sprintf("Cilium endpoint %s/%s on node %s was not deleted in time",
+			namespace, pod, node),
+		&TimeoutConfig{Timeout: HelperTimeout})
 }
 
 // CiliumIsPolicyLoaded returns true if the policy is loaded in the given
@@ -3329,9 +3444,10 @@ func addrsEqual(addr1, addr2 *models.BackendAddress) bool {
 // prefixing with timestamp
 func GenerateNamespaceForTest(seed string) string {
 	lowered := strings.ToLower(ginkgoext.CurrentGinkgoTestDescription().FullTestText)
-	// K8s namespaces cannot have spaces or underscores.
+	// K8s namespaces cannot have spaces, underscores or slashes.
 	replaced := strings.Replace(lowered, " ", "", -1)
 	replaced = strings.Replace(replaced, "_", "", -1)
+	replaced = strings.Replace(replaced, "/", "", -1)
 
 	timestamped := time.Now().Format("200601021504") + seed + replaced
 

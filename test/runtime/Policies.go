@@ -1496,6 +1496,10 @@ var _ = Describe("RuntimePolicies", func() {
 					"No ingress policy log record",
 				)
 				monitorRes.ExpectContains(fmt.Sprintf("-> endpoint %s ", endpointID), "No ingress traffic to endpoint")
+
+				By("Testing cilium endpoint list output")
+				res = vm.Exec("cilium endpoint list")
+				res.ExpectMatchesRegexp(endpointID+"\\s*Disabled \\(Audit\\)\\s*Disabled \\(Audit\\)", "Endpoint is not in audit mode")
 			})
 
 			It("tests egress", func() {
@@ -1515,6 +1519,10 @@ var _ = Describe("RuntimePolicies", func() {
 					"No egress policy log record",
 				)
 				monitorRes.ExpectContains(fmt.Sprintf("-> endpoint %s ", endpointID), "No reply traffic to endpoint")
+
+				By("Testing cilium endpoint list output")
+				res := vm.Exec("cilium endpoint list")
+				res.ExpectMatchesRegexp(endpointID+"\\s*Disabled \\(Audit\\)\\s*Disabled \\(Audit\\)", "Endpoint is not in audit mode")
 			})
 		})
 	})
@@ -1671,7 +1679,7 @@ var _ = Describe("RuntimePolicyImportTests", func() {
 	It("Invalid Policies", func() {
 
 		testInvalidPolicy := func(data string) {
-			err := helpers.RenderTemplateToFile(invalidJSON, data, 0777)
+			err := vm.RenderTemplateToFile(invalidJSON, data, 0777)
 			Expect(err).Should(BeNil())
 
 			path := vm.GetFilePath(invalidJSON)
@@ -1704,7 +1712,7 @@ var _ = Describe("RuntimePolicyImportTests", func() {
 		)
 
 		BeforeEach(func() {
-			err := helpers.RenderTemplateToFile(policyJSON, policy, 0777)
+			err := vm.RenderTemplateToFile(policyJSON, policy, 0777)
 			Expect(err).Should(BeNil())
 
 			path := vm.GetFilePath(policyJSON)

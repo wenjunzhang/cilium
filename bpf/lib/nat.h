@@ -114,8 +114,7 @@ struct ipv4_nat_target {
 	bool src_from_world;
 };
 
-#if defined(ENABLE_IPV4) && \
-	(defined(ENABLE_MASQUERADE) || defined(ENABLE_NODEPORT))
+#if defined(ENABLE_IPV4) && defined(ENABLE_NODEPORT)
 struct bpf_elf_map __section_maps SNAT_MAPPING_IPV4 = {
 	.type		= NAT_MAP_TYPE,
 	.size_key	= sizeof(struct ipv4_ct_tuple),
@@ -126,6 +125,17 @@ struct bpf_elf_map __section_maps SNAT_MAPPING_IPV4 = {
 	.flags		= CONDITIONAL_PREALLOC,
 #endif
 };
+
+#ifdef ENABLE_IP_MASQ_AGENT
+struct bpf_elf_map __section_maps IP_MASQ_AGENT_IPV4 = {
+	.type		= BPF_MAP_TYPE_LPM_TRIE,
+	.size_key	= sizeof(struct lpm_v4_key),
+	.size_value	= sizeof(struct lpm_val),
+	.pinning	= PIN_GLOBAL_NS,
+	.max_elem	= 16384,
+	.flags		= BPF_F_NO_PREALLOC,
+};
+#endif
 
 static __always_inline
 struct ipv4_nat_entry *snat_v4_lookup(const struct ipv4_ct_tuple *tuple)
@@ -151,7 +161,7 @@ static __always_inline void snat_v4_delete(const struct ipv4_ct_tuple *otuple,
 static __always_inline void snat_v4_swap_tuple(const struct ipv4_ct_tuple *otuple,
 					       struct ipv4_ct_tuple *rtuple)
 {
-	__builtin_memset(rtuple, 0, sizeof(*rtuple));
+	memset(rtuple, 0, sizeof(*rtuple));
 	rtuple->nexthdr = otuple->nexthdr;
 	rtuple->daddr = otuple->saddr;
 	rtuple->saddr = otuple->daddr;
@@ -207,8 +217,8 @@ static __always_inline int snat_v4_new_mapping(struct __ctx_buff *ctx,
 	struct ipv4_ct_tuple rtuple;
 	__u16 port;
 
-	__builtin_memset(&rstate, 0, sizeof(rstate));
-	__builtin_memset(ostate, 0, sizeof(*ostate));
+	memset(&rstate, 0, sizeof(rstate));
+	memset(ostate, 0, sizeof(*ostate));
 
 	rstate.to_daddr = otuple->saddr;
 	rstate.to_dport = otuple->sport;
@@ -272,8 +282,8 @@ static __always_inline int snat_v4_track_local(struct __ctx_buff *ctx,
 	if (!needs_ct)
 		return 0;
 
-	__builtin_memset(&ct_state, 0, sizeof(ct_state));
-	__builtin_memcpy(&tmp, tuple, sizeof(tmp));
+	memset(&ct_state, 0, sizeof(ct_state));
+	memcpy(&tmp, tuple, sizeof(tmp));
 
 	where = dir == NAT_DIR_INGRESS ? CT_INGRESS : CT_EGRESS;
 
@@ -423,14 +433,17 @@ static __always_inline int snat_v4_rewrite_ingress(struct __ctx_buff *ctx,
 }
 
 static __always_inline bool snat_v4_can_skip(const struct ipv4_nat_target *target,
-					     const struct ipv4_ct_tuple *tuple, int dir)
+					     const struct ipv4_ct_tuple *tuple, int dir,
+					     bool from_endpoint)
 {
 	__u16 dport = bpf_ntohs(tuple->dport), sport = bpf_ntohs(tuple->sport);
 
-	if (dir == NAT_DIR_EGRESS && !target->src_from_world && sport < NAT_MIN_EGRESS)
+	if (dir == NAT_DIR_EGRESS && !from_endpoint && !target->src_from_world
+	    && sport < NAT_MIN_EGRESS)
 		return true;
 	if (dir == NAT_DIR_INGRESS && (dport < target->min_port || dport > target->max_port))
 		return true;
+
 	return false;
 }
 
@@ -483,12 +496,13 @@ static __always_inline __maybe_unused int snat_v4_create_dsr(struct __ctx_buff *
 	return CTX_ACT_OK;
 }
 
-static __always_inline int snat_v4_process(struct __ctx_buff *ctx, int dir,
-					   const struct ipv4_nat_target *target)
+static __always_inline __maybe_unused int snat_v4_process(struct __ctx_buff *ctx, int dir,
+						const struct ipv4_nat_target *target,
+						bool from_endpoint)
 {
+	struct icmphdr icmphdr __align_stack_8;
 	struct ipv4_nat_entry *state, tmp;
 	struct ipv4_ct_tuple tuple = {};
-	struct icmphdr icmphdr;
 	void *data, *data_end;
 	struct iphdr *ip4;
 	struct {
@@ -534,7 +548,7 @@ static __always_inline int snat_v4_process(struct __ctx_buff *ctx, int dir,
 		return NAT_PUNT_TO_STACK;
 	};
 
-	if (snat_v4_can_skip(target, &tuple, dir))
+	if (snat_v4_can_skip(target, &tuple, dir, from_endpoint))
 		return NAT_PUNT_TO_STACK;
 	ret = snat_v4_handle_mapping(ctx, &tuple, &state, &tmp, dir, off, target);
 	if (ret > 0)
@@ -550,7 +564,8 @@ static __always_inline int snat_v4_process(struct __ctx_buff *ctx, int dir,
 static __always_inline __maybe_unused
 int snat_v4_process(struct __ctx_buff *ctx __maybe_unused,
 		    int dir __maybe_unused,
-		    const struct ipv4_nat_target *target __maybe_unused)
+		    const struct ipv4_nat_target *target __maybe_unused,
+		    bool from_endpoint __maybe_unused)
 {
 	return CTX_ACT_OK;
 }
@@ -582,8 +597,7 @@ struct ipv6_nat_target {
 	bool src_from_world;
 };
 
-#if defined(ENABLE_IPV6) && \
-	(defined(ENABLE_MASQUERADE) || defined(ENABLE_NODEPORT))
+#if defined(ENABLE_IPV6) && defined(ENABLE_NODEPORT)
 struct bpf_elf_map __section_maps SNAT_MAPPING_IPV6 = {
 	.type		= NAT_MAP_TYPE,
 	.size_key	= sizeof(struct ipv6_ct_tuple),
@@ -616,10 +630,10 @@ static __always_inline void snat_v6_delete(const struct ipv6_ct_tuple *otuple,
 	__snat_delete(&SNAT_MAPPING_IPV6, otuple, rtuple);
 }
 
-static __always_inline void snat_v6_swap_tuple(struct ipv6_ct_tuple *otuple,
+static __always_inline void snat_v6_swap_tuple(const struct ipv6_ct_tuple *otuple,
 					       struct ipv6_ct_tuple *rtuple)
 {
-	__builtin_memset(rtuple, 0, sizeof(*rtuple));
+	memset(rtuple, 0, sizeof(*rtuple));
 	rtuple->nexthdr = otuple->nexthdr;
 	rtuple->daddr = otuple->saddr;
 	rtuple->saddr = otuple->daddr;
@@ -676,8 +690,8 @@ static __always_inline int snat_v6_new_mapping(struct __ctx_buff *ctx,
 	struct ipv6_ct_tuple rtuple;
 	__u16 port;
 
-	__builtin_memset(&rstate, 0, sizeof(rstate));
-	__builtin_memset(ostate, 0, sizeof(*ostate));
+	memset(&rstate, 0, sizeof(rstate));
+	memset(ostate, 0, sizeof(*ostate));
 
 	rstate.to_daddr = otuple->saddr;
 	rstate.to_dport = otuple->sport;
@@ -722,7 +736,7 @@ static __always_inline int snat_v6_new_mapping(struct __ctx_buff *ctx,
 
 static __always_inline int snat_v6_track_local(struct __ctx_buff *ctx,
 					       struct ipv6_ct_tuple *tuple,
-					       struct ipv6_nat_entry *state,
+					       const struct ipv6_nat_entry *state,
 					       int dir, __u32 off,
 					       const struct ipv6_nat_target *target)
 {
@@ -741,8 +755,8 @@ static __always_inline int snat_v6_track_local(struct __ctx_buff *ctx,
 	if (!needs_ct)
 		return 0;
 
-	__builtin_memset(&ct_state, 0, sizeof(ct_state));
-	__builtin_memcpy(&tmp, tuple, sizeof(tmp));
+	memset(&ct_state, 0, sizeof(ct_state));
+	memcpy(&tmp, tuple, sizeof(tmp));
 
 	where = dir == NAT_DIR_INGRESS ? CT_INGRESS : CT_EGRESS;
 
@@ -945,12 +959,12 @@ static __always_inline __maybe_unused int snat_v6_create_dsr(struct __ctx_buff *
 	return CTX_ACT_OK;
 }
 
-static __always_inline int snat_v6_process(struct __ctx_buff *ctx, int dir,
+static __always_inline __maybe_unused int snat_v6_process(struct __ctx_buff *ctx, int dir,
 					   const struct ipv6_nat_target *target)
 {
+	struct icmp6hdr icmp6hdr __align_stack_8;
 	struct ipv6_nat_entry *state, tmp;
 	struct ipv6_ct_tuple tuple = {};
-	struct icmp6hdr icmp6hdr;
 	void *data, *data_end;
 	struct ipv6hdr *ip6;
 	int ret, hdrlen;
@@ -1026,7 +1040,7 @@ int snat_v6_process(struct __ctx_buff *ctx __maybe_unused,
 	return CTX_ACT_OK;
 }
 
-static __always_inline
+static __always_inline __maybe_unused
 void snat_v6_delete_tuples(struct ipv6_ct_tuple *tuple __maybe_unused)
 {
 }
@@ -1070,37 +1084,4 @@ ct_delete6(const void *map __maybe_unused,
 }
 #endif
 
-static __always_inline __maybe_unused int
-snat_process(struct __ctx_buff *ctx __maybe_unused, int dir __maybe_unused)
-{
-	int ret = CTX_ACT_OK;
-
-#ifdef ENABLE_MASQUERADE
-	switch (ctx_get_protocol(ctx)) {
-#ifdef ENABLE_IPV4
-	case bpf_htons(ETH_P_IP): {
-		struct ipv4_nat_target target = {
-			.min_port = SNAT_MAPPING_MIN_PORT,
-			.max_port = SNAT_MAPPING_MAX_PORT,
-			.addr  = SNAT_IPV4_EXTERNAL,
-		};
-		ret = snat_v4_process(ctx, dir, &target);
-		break; }
-#endif
-#ifdef ENABLE_IPV6
-	case bpf_htons(ETH_P_IPV6): {
-		struct ipv6_nat_target target = {
-			.min_port = SNAT_MAPPING_MIN_PORT,
-			.max_port = SNAT_MAPPING_MAX_PORT,
-		};
-		BPF_V6(target.addr, SNAT_IPV6_EXTERNAL);
-		ret = snat_v6_process(ctx, dir, &target);
-		break; }
-#endif
-	}
-	if (IS_ERR(ret))
-		return send_drop_notify_error(ctx, 0, ret, CTX_ACT_DROP, dir);
-#endif
-	return ret;
-}
 #endif /* __LIB_NAT__ */

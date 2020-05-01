@@ -1,4 +1,5 @@
 // Copyright 2020 Authors of Hubble
+// Copyright 2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,6 +26,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/reflection"
 )
 
 // Server is hubble's gRPC server.
@@ -36,7 +38,9 @@ type Server struct {
 
 // NewServer creates a new hubble gRPC server.
 func NewServer(log *logrus.Entry, options ...serveroption.Option) (*Server, error) {
-	opts := serveroption.Default
+	opts := serveroption.Options{
+		Listeners: make(map[string]net.Listener),
+	}
 	for _, opt := range options {
 		if err := opt(&opts); err != nil {
 			return nil, fmt.Errorf("failed to apply option: %v", err)
@@ -51,12 +55,13 @@ func (s *Server) initGRPCServer() {
 		healthpb.RegisterHealthServer(srv, s.opts.HealthService)
 	}
 	if s.opts.ObserverService != nil {
-		observerpb.RegisterObserverServer(srv, *s.opts.ObserverService)
+		observerpb.RegisterObserverServer(srv, s.opts.ObserverService)
 	}
 	if s.opts.PeerService != nil {
-		peerpb.RegisterPeerServer(srv, *s.opts.PeerService)
+		peerpb.RegisterPeerServer(srv, s.opts.PeerService)
 	}
 	s.srv = srv
+	reflection.Register(s.srv)
 }
 
 // Serve starts the hubble server. It accepts new connections on configured

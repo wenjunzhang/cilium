@@ -36,9 +36,11 @@ Elasticsearch
 FIt
 Facebook
 Fastabend
+Fosdem
 GCE
 Gartrell
 Geneve
+GiB
 Github
 Golang
 Gospodarek
@@ -47,8 +49,11 @@ Grafana
 Gunawardena
 Holzheu
 Huapeng
+hubble
+hubble-relay
 Hypercalls
 IP
+ipam
 IPsec
 IPv
 Integrations
@@ -164,6 +169,7 @@ apiKeys
 apiVersion
 apiserver
 arithmetics
+artii
 asm
 au
 authenticator
@@ -210,6 +216,7 @@ cni
 cnp
 codebase
 conf
+contrib
 config
 conntrack
 containerd
@@ -260,6 +267,7 @@ elfutils
 endian
 endianness
 endpointSelector
+endpointmanager
 etcd
 ethernet
 ethtool
@@ -300,11 +308,15 @@ hardcoded
 hardcoding
 hashtable
 hashtables
+herokuapp
 hexData
 hoc
 hostPort
+hostport
+hostscope
 hq
 https
+hubble
 hugepages
 hypervisor
 hypervisors
@@ -321,6 +333,7 @@ integrations
 io
 ip
 ipcache
+ipmasq
 iproute
 ipsec
 iptables
@@ -393,6 +406,7 @@ lwt
 macOS
 matchLabels
 matchPattern
+masq
 mc
 mediabot
 memcache
@@ -436,6 +450,7 @@ observability
 onData
 onwards
 opcodes
+openapi
 openSUSE
 openssl
 orchestrator
@@ -532,7 +547,6 @@ supergalatic
 superset
 svc
 sw
-swapi
 sys
 syscall
 sysctl

@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	operatorMetrics "github.com/cilium/cilium/operator/metrics"
+	operatorOption "github.com/cilium/cilium/operator/option"
 	apiMetrics "github.com/cilium/cilium/pkg/api/metrics"
 	azureAPI "github.com/cilium/cilium/pkg/azure/api"
 	azureIPAM "github.com/cilium/cilium/pkg/azure/ipam"
@@ -26,7 +27,6 @@ import (
 	ipamMetrics "github.com/cilium/cilium/pkg/ipam/metrics"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/option"
 	"github.com/pkg/errors"
 )
 
@@ -48,7 +48,7 @@ func (*AllocatorAzure) Start(getterUpdater ipam.CiliumNodeGetterUpdater) (*ipam.
 
 	log.Info("Starting Azure IP allocator...")
 
-	subscriptionID := option.Config.AzureSubscriptionID
+	subscriptionID := operatorOption.Config.AzureSubscriptionID
 	if subscriptionID == "" {
 		log.Debug("SubscriptionID was not specified via CLI, retrieving it via Azure IMS")
 		subID, err := azureAPI.GetSubscriptionID(context.TODO())
@@ -59,7 +59,7 @@ func (*AllocatorAzure) Start(getterUpdater ipam.CiliumNodeGetterUpdater) (*ipam.
 		log.WithField("subscriptionID", subscriptionID).Debug("Detected subscriptionID via Azure IMS")
 	}
 
-	resourceGroupName := option.Config.AzureResourceGroup
+	resourceGroupName := operatorOption.Config.AzureResourceGroup
 	if resourceGroupName == "" {
 		log.Debug("ResourceGroupName was not specified via CLI, retrieving it via Azure IMS")
 		rgName, err := azureAPI.GetResourceGroupName(context.TODO())
@@ -70,7 +70,7 @@ func (*AllocatorAzure) Start(getterUpdater ipam.CiliumNodeGetterUpdater) (*ipam.
 		log.WithField("resourceGroupName", resourceGroupName).Debug("Detected resource group name via Azure IMS")
 	}
 
-	if option.Config.EnableMetrics {
+	if operatorOption.Config.EnableMetrics {
 		azMetrics = apiMetrics.NewPrometheusMetrics(operatorMetrics.Namespace, "azure", operatorMetrics.Registry)
 		iMetrics = ipamMetrics.NewPrometheusMetrics(operatorMetrics.Namespace, operatorMetrics.Registry)
 	} else {
@@ -78,12 +78,12 @@ func (*AllocatorAzure) Start(getterUpdater ipam.CiliumNodeGetterUpdater) (*ipam.
 		iMetrics = &ipamMetrics.NoOpMetrics{}
 	}
 
-	azureClient, err := azureAPI.NewClient(subscriptionID, resourceGroupName, azMetrics, option.Config.IPAMAPIQPSLimit, option.Config.IPAMAPIBurst)
+	azureClient, err := azureAPI.NewClient(subscriptionID, resourceGroupName, azMetrics, operatorOption.Config.IPAMAPIQPSLimit, operatorOption.Config.IPAMAPIBurst)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create Azure client: %w", err)
 	}
 	instances := azureIPAM.NewInstancesManager(azureClient)
-	nodeManager, err := ipam.NewNodeManager(instances, getterUpdater, iMetrics, option.Config.ParallelAllocWorkers, false)
+	nodeManager, err := ipam.NewNodeManager(instances, getterUpdater, iMetrics, operatorOption.Config.ParallelAllocWorkers, false)
 	if err != nil {
 		return nil, fmt.Errorf("unable to initialize Azure node manager: %w", err)
 	}

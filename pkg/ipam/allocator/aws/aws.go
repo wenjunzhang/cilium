@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	operatorMetrics "github.com/cilium/cilium/operator/metrics"
+	operatorOption "github.com/cilium/cilium/operator/option"
 	apiMetrics "github.com/cilium/cilium/pkg/api/metrics"
 	ec2shim "github.com/cilium/cilium/pkg/aws/ec2"
 	"github.com/cilium/cilium/pkg/aws/eni"
@@ -26,7 +27,6 @@ import (
 	ipamMetrics "github.com/cilium/cilium/pkg/ipam/metrics"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/option"
 
 	"github.com/aws/aws-sdk-go-v2/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go-v2/aws/external"
@@ -41,10 +41,10 @@ type AllocatorAWS struct{}
 
 // Init sets up ENI limits based on given options
 func (*AllocatorAWS) Init() error {
-	if err := eni.UpdateLimitsFromUserDefinedMappings(option.Config.AwsInstanceLimitMapping); err != nil {
+	if err := eni.UpdateLimitsFromUserDefinedMappings(operatorOption.Config.AWSInstanceLimitMapping); err != nil {
 		return fmt.Errorf("failed to parse aws-instance-limit-mapping: %w", err)
 	}
-	if option.Config.UpdateEC2AdapterLimitViaAPI {
+	if operatorOption.Config.UpdateEC2AdapterLimitViaAPI {
 		if err := eni.UpdateLimitsFromEC2API(context.TODO()); err != nil {
 			return fmt.Errorf("unable to update instance type to adapter limits from EC2 API: %w", err)
 		}
@@ -82,7 +82,7 @@ func (*AllocatorAWS) Start(getterUpdater ipam.CiliumNodeGetterUpdater) (*ipam.No
 
 	cfg.Region = instance.Region
 
-	if option.Config.EnableMetrics {
+	if operatorOption.Config.EnableMetrics {
 		aMetrics = apiMetrics.NewPrometheusMetrics("ipam", operatorMetrics.Namespace, operatorMetrics.Registry)
 		iMetrics = ipamMetrics.NewPrometheusMetrics(operatorMetrics.Namespace, operatorMetrics.Registry)
 	} else {
@@ -90,12 +90,12 @@ func (*AllocatorAWS) Start(getterUpdater ipam.CiliumNodeGetterUpdater) (*ipam.No
 		iMetrics = &ipamMetrics.NoOpMetrics{}
 	}
 
-	subnetsFilters := ec2shim.NewSubnetsFilters(option.Config.IPAMSubnetsTags, option.Config.IPAMSubnetsIDs)
-	ec2Client := ec2shim.NewClient(ec2.New(cfg), aMetrics, option.Config.IPAMAPIQPSLimit, option.Config.IPAMAPIBurst, subnetsFilters)
+	subnetsFilters := ec2shim.NewSubnetsFilters(operatorOption.Config.IPAMSubnetsTags, operatorOption.Config.IPAMSubnetsIDs)
+	ec2Client := ec2shim.NewClient(ec2.New(cfg), aMetrics, operatorOption.Config.IPAMAPIQPSLimit, operatorOption.Config.IPAMAPIBurst, subnetsFilters)
 	log.Info("Connected to EC2 service API")
-	instances := eni.NewInstancesManager(ec2Client, option.Config.ENITags)
+	instances := eni.NewInstancesManager(ec2Client, operatorOption.Config.ENITags)
 	nodeManager, err := ipam.NewNodeManager(instances, getterUpdater, iMetrics,
-		option.Config.ParallelAllocWorkers, option.Config.AwsReleaseExcessIps)
+		operatorOption.Config.ParallelAllocWorkers, operatorOption.Config.AWSReleaseExcessIPs)
 	if err != nil {
 		return nil, fmt.Errorf("unable to initialize ENI node manager: %w", err)
 	}

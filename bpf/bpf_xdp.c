@@ -17,25 +17,11 @@
 #include "lib/events.h"
 #include "lib/nodeport.h"
 
+#ifdef ENABLE_PREFILTER
 #ifndef HAVE_LPM_TRIE_MAP_TYPE
 # undef CIDR4_LPM_PREFILTER
 # undef CIDR6_LPM_PREFILTER
 #endif
-
-struct lpm_v4_key {
-	struct bpf_lpm_trie_key lpm;
-	__u8 addr[4];
-};
-
-struct lpm_v6_key {
-	struct bpf_lpm_trie_key lpm;
-	__u8 addr[16];
-};
-
-struct lpm_val {
-	/* Just dummy for now. */
-	__u8 flags;
-};
 
 #ifdef CIDR4_FILTER
 struct bpf_elf_map __section_maps CIDR4_HMAP_NAME = {
@@ -80,6 +66,28 @@ struct bpf_elf_map __section_maps CIDR6_LMAP_NAME = {
 };
 #endif /* CIDR6_LPM_PREFILTER */
 #endif /* CIDR6_FILTER */
+#endif /* ENABLE_PREFILTER */
+
+static __always_inline __maybe_unused int
+bpf_xdp_exit(struct __ctx_buff *ctx, const int verdict)
+{
+	/* Undo meta data, so GRO can perform natural aggregation. */
+	if (verdict == CTX_ACT_OK) {
+		__u32 meta_xfer = ctx_load_meta(ctx, XFER_MARKER);
+
+		/* We transfer data from XFER_MARKER. This specifically
+		 * does not break packet trains in GRO.
+		 */
+		if (meta_xfer) {
+			ctx_adjust_meta(ctx, META_PIVOT - sizeof(__u32));
+			ctx_store_meta(ctx, 0, meta_xfer);
+		} else {
+			ctx_adjust_meta(ctx, META_PIVOT);
+		}
+	}
+
+	return verdict;
+}
 
 #ifdef ENABLE_IPV4
 #ifdef ENABLE_NODEPORT_ACCELERATION
@@ -95,7 +103,7 @@ int tail_lb_ipv4(struct __ctx_buff *ctx)
 						      METRIC_INGRESS);
 	}
 
-	return ret;
+	return bpf_xdp_exit(ctx, ret);
 }
 
 static __always_inline int check_v4_lb(struct __ctx_buff *ctx)
@@ -111,6 +119,7 @@ static __always_inline int check_v4_lb(struct __ctx_buff *ctx __maybe_unused)
 }
 #endif /* ENABLE_NODEPORT_ACCELERATION */
 
+#ifdef ENABLE_PREFILTER
 static __always_inline int check_v4(struct __ctx_buff *ctx)
 {
 	void *data_end = ctx_data_end(ctx);
@@ -122,7 +131,7 @@ static __always_inline int check_v4(struct __ctx_buff *ctx)
 		return CTX_ACT_DROP;
 
 #ifdef CIDR4_FILTER
-	__builtin_memcpy(pfx.lpm.data, &ipv4_hdr->saddr, sizeof(pfx.addr));
+	memcpy(pfx.lpm.data, &ipv4_hdr->saddr, sizeof(pfx.addr));
 	pfx.lpm.prefixlen = 32;
 
 #ifdef CIDR4_LPM_PREFILTER
@@ -136,6 +145,12 @@ static __always_inline int check_v4(struct __ctx_buff *ctx)
 	return check_v4_lb(ctx);
 #endif /* CIDR4_FILTER */
 }
+#else
+static __always_inline int check_v4(struct __ctx_buff *ctx)
+{
+	return check_v4_lb(ctx);
+}
+#endif /* ENABLE_PREFILTER */
 #endif /* ENABLE_IPV4 */
 
 #ifdef ENABLE_IPV6
@@ -152,7 +167,7 @@ int tail_lb_ipv6(struct __ctx_buff *ctx)
 						      METRIC_INGRESS);
 	}
 
-	return ret;
+	return bpf_xdp_exit(ctx, ret);
 }
 
 static __always_inline int check_v6_lb(struct __ctx_buff *ctx)
@@ -168,6 +183,7 @@ static __always_inline int check_v6_lb(struct __ctx_buff *ctx __maybe_unused)
 }
 #endif /* ENABLE_NODEPORT */
 
+#ifdef ENABLE_PREFILTER
 static __always_inline int check_v6(struct __ctx_buff *ctx)
 {
 	void *data_end = ctx_data_end(ctx);
@@ -179,7 +195,7 @@ static __always_inline int check_v6(struct __ctx_buff *ctx)
 		return CTX_ACT_DROP;
 
 #ifdef CIDR6_FILTER
-	__builtin_memcpy(pfx.lpm.data, &ipv6_hdr->saddr, sizeof(pfx.addr));
+	memcpy(pfx.lpm.data, &ipv6_hdr->saddr, sizeof(pfx.addr));
 	pfx.lpm.prefixlen = 128;
 
 #ifdef CIDR6_LPM_PREFILTER
@@ -193,6 +209,12 @@ static __always_inline int check_v6(struct __ctx_buff *ctx)
 	return check_v6_lb(ctx);
 #endif /* CIDR6_FILTER */
 }
+#else
+static __always_inline int check_v6(struct __ctx_buff *ctx)
+{
+	return check_v6_lb(ctx);
+}
+#endif /* ENABLE_PREFILTER */
 #endif /* ENABLE_IPV6 */
 
 static __always_inline int check_filters(struct __ctx_buff *ctx)
@@ -205,6 +227,7 @@ static __always_inline int check_filters(struct __ctx_buff *ctx)
 	if (ctx_adjust_meta(ctx, -META_PIVOT))
 		return CTX_ACT_OK;
 
+	ctx_store_meta(ctx, XFER_MARKER, 0);
 	bpf_skip_nodeport_clear(ctx);
 
 	switch (proto) {
@@ -222,7 +245,7 @@ static __always_inline int check_filters(struct __ctx_buff *ctx)
 		break;
 	}
 
-	return ret;
+	return bpf_xdp_exit(ctx, ret);
 }
 
 __section("from-netdev")

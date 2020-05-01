@@ -44,6 +44,7 @@ import (
 	"github.com/cilium/cilium/pkg/envoy"
 	"github.com/cilium/cilium/pkg/flowdebug"
 	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/ipmasq"
 	"github.com/cilium/cilium/pkg/k8s"
 	"github.com/cilium/cilium/pkg/k8s/watchers"
 	"github.com/cilium/cilium/pkg/kvstore"
@@ -52,10 +53,14 @@ import (
 	"github.com/cilium/cilium/pkg/loadinfo"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/maps/ctmap"
 	"github.com/cilium/cilium/pkg/maps/ctmap/gc"
+	"github.com/cilium/cilium/pkg/maps/nat"
+	"github.com/cilium/cilium/pkg/maps/policymap"
 	"github.com/cilium/cilium/pkg/metrics"
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
 	"github.com/cilium/cilium/pkg/node"
+	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/pidfile"
 	"github.com/cilium/cilium/pkg/policy"
@@ -229,21 +234,8 @@ func init() {
 	flags.String(option.ConfigDir, "", `Configuration directory that contains a file for each option`)
 	option.BindEnv(option.ConfigDir)
 
-	flags.Uint(option.ConntrackGarbageCollectorIntervalDeprecated, 0, "Garbage collection interval for the connection tracking table (in seconds)")
-	flags.MarkDeprecated(option.ConntrackGarbageCollectorIntervalDeprecated, fmt.Sprintf("please use --%s", option.ConntrackGCInterval))
-	option.BindEnv(option.ConntrackGarbageCollectorIntervalDeprecated)
-
 	flags.Duration(option.ConntrackGCInterval, time.Duration(0), "Overwrite the connection-tracking garbage collection interval")
 	option.BindEnv(option.ConntrackGCInterval)
-
-	flags.StringSlice(option.ContainerRuntime, option.ContainerRuntimeAuto, `Sets the container runtime(s) used by Cilium { containerd | crio | docker | none | auto } ( "auto" uses the container runtime found in the order: "docker", "containerd", "crio" )`)
-	option.BindEnv(option.ContainerRuntime)
-	flags.MarkDeprecated(option.ContainerRuntime, "This option is no longer supported and will be removed in v1.8")
-
-	flags.Var(option.NewNamedMapOptions(option.ContainerRuntimeEndpoint, &map[string]string{}, nil),
-		option.ContainerRuntimeEndpoint, `Container runtime(s) endpoint(s).`)
-	option.BindEnv(option.ContainerRuntimeEndpoint)
-	flags.MarkDeprecated(option.ContainerRuntimeEndpoint, "This option is no longer supported and will be removed in v1.8")
 
 	flags.BoolP(option.DebugArg, "D", false, "Enable debugging mode")
 	option.BindEnv(option.DebugArg)
@@ -501,7 +493,7 @@ func init() {
 	flags.Bool(option.EnableNodePort, false, "Enable NodePort type services by Cilium (beta)")
 	option.BindEnv(option.EnableNodePort)
 
-	flags.String(option.NodePortMode, option.NodePortModeHybrid, "BPF NodePort mode (\"snat\", \"dsr\", \"hybrid\")")
+	flags.String(option.NodePortMode, option.NodePortModeSNAT, "BPF NodePort mode (\"snat\", \"dsr\", \"hybrid\")")
 	option.BindEnv(option.NodePortMode)
 
 	flags.Bool(option.EnableAutoProtectNodePortRange, true,
@@ -512,8 +504,14 @@ func init() {
 	flags.StringSlice(option.NodePortRange, []string{fmt.Sprintf("%d", option.NodePortMinDefault), fmt.Sprintf("%d", option.NodePortMaxDefault)}, "Set the min/max NodePort port range")
 	option.BindEnv(option.NodePortRange)
 
+	flags.Bool(option.NodePortBindProtection, true, "Reject application bind(2) requests to service ports in the NodePort range")
+	option.BindEnv(option.NodePortBindProtection)
+
 	flags.String(option.NodePortAcceleration, option.NodePortAccelerationNone, "BPF NodePort acceleration via XDP (\"native\", \"none\")")
 	option.BindEnv(option.NodePortAcceleration)
+
+	flags.Bool(option.EnableSessionAffinity, false, "Enable support for service session affinity")
+	option.BindEnv(option.EnableSessionAffinity)
 
 	flags.String(option.LibDir, defaults.LibraryPath, "Directory path to store runtime build environment")
 	option.BindEnv(option.LibDir)
@@ -536,6 +534,18 @@ func init() {
 
 	flags.Bool(option.Masquerade, true, "Masquerade packets from endpoints leaving the host")
 	option.BindEnv(option.Masquerade)
+
+	flags.Bool(option.EnableBPFMasquerade, false, "Masquerade packets from endpoints leaving the host with BPF instead of iptables")
+	option.BindEnv(option.EnableBPFMasquerade)
+
+	flags.Bool(option.EnableIPMasqAgent, false, "Enable BPF ip-masq-agent")
+	option.BindEnv(option.EnableIPMasqAgent)
+
+	flags.String(option.IPMasqAgentConfigPath, "/etc/config/ip-masq-agent", "ip-masq-agent configuration file path")
+	option.BindEnv(option.IPMasqAgentConfigPath)
+
+	flags.Duration(option.IPMasqAgentSyncPeriod, 60*time.Second, "ip-masq-agent configuration file synchronization period")
+	option.BindEnv(option.IPMasqAgentSyncPeriod)
 
 	flags.Bool(option.InstallIptRules, true, "Install base iptables rules for cilium to mainly interact with kube-proxy (and masquerading)")
 	option.BindEnv(option.InstallIptRules)
@@ -670,11 +680,14 @@ func init() {
 	flags.Int(option.PolicyMapEntriesName, defaults.PolicyMapEntries, "Maximum number of entries in endpoint policy map (per endpoint)")
 	option.BindEnv(option.PolicyMapEntriesName)
 
+	flags.Float64(option.MapEntriesGlobalDynamicSizeRatioName, 0.0, "Ratio (0.0-1.0) of total system memory to use for dynamic sizing of CT, NAT and policy BPF maps. Set to 0.0 to disable dynamic BPF map sizing (default: 0.0)")
+	option.BindEnv(option.MapEntriesGlobalDynamicSizeRatioName)
+
 	flags.String(option.CMDRef, "", "Path to cmdref output directory")
 	flags.MarkHidden(option.CMDRef)
 	option.BindEnv(option.CMDRef)
 
-	flags.Int(option.ToFQDNsMinTTL, 0, fmt.Sprintf("The minimum time, in seconds, to use DNS data for toFQDNs policies. (default %d when --tofqdns-enable-poller, %d otherwise)", defaults.ToFQDNsMinTTLPoller, defaults.ToFQDNsMinTTL))
+	flags.Int(option.ToFQDNsMinTTL, 0, fmt.Sprintf("The minimum time, in seconds, to use DNS data for toFQDNs policies. (default %d )", defaults.ToFQDNsMinTTL))
 	option.BindEnv(option.ToFQDNsMinTTL)
 
 	flags.Int(option.ToFQDNsProxyPort, 0, "Global port on which the in-agent DNS proxy should listen. Default 0 is a OS-assigned port.")
@@ -682,9 +695,11 @@ func init() {
 
 	flags.Bool(option.ToFQDNsEnablePoller, false, "Enable proactive polling of DNS names in toFQDNs.matchName rules.")
 	option.BindEnv(option.ToFQDNsEnablePoller)
+	flags.MarkDeprecated(option.ToFQDNsEnablePoller, "This option has been deprecated and will be removed in v1.9")
 
 	flags.Bool(option.ToFQDNsEnablePollerEvents, true, "Emit DNS responses seen by the DNS poller as Monitor events, if the poller is enabled.")
 	option.BindEnv(option.ToFQDNsEnablePollerEvents)
+	flags.MarkDeprecated(option.ToFQDNsEnablePollerEvents, "This option has been deprecated and will be removed in v1.9")
 
 	flags.StringVar(&option.Config.FQDNRejectResponse, option.FQDNRejectResponseCode, option.FQDNProxyDenyWithRefused, fmt.Sprintf("DNS response code for rejecting DNS requests, available options are '%v'", option.FQDNRejectOptions))
 	option.BindEnv(option.FQDNRejectResponseCode)
@@ -797,6 +812,13 @@ func restoreExecPermissions(searchDir string, patterns ...string) error {
 }
 
 func initEnv(cmd *cobra.Command) {
+	option.Config.SetMapElementSizes(
+		// for the conntrack and NAT element size we assume the largest possible
+		// key size, i.e. IPv6 keys
+		ctmap.SizeofCtKey6Global+ctmap.SizeofCtEntry,
+		nat.SizeofNatKey6+nat.SizeofNatEntry6,
+		policymap.SizeofPolicyKey+policymap.SizeofPolicyEntry)
+
 	// Prepopulate option.Config with options from CLI.
 	option.Config.Populate()
 
@@ -807,6 +829,12 @@ func initEnv(cmd *cobra.Command) {
 	logging.SetupLogging(option.Config.LogDriver, option.Config.LogOpt, "cilium-agent", option.Config.Debug)
 
 	option.LogRegisteredOptions(log)
+
+	// Configure k8s as soon as possible so that k8s.IsEnabled() has the right
+	// behavior.
+	bootstrapStats.k8sInit.Start()
+	k8s.Configure(option.Config.K8sAPIServer, option.Config.K8sKubeConfigPath, defaults.K8sClientQPSLimit, defaults.K8sClientBurst)
+	bootstrapStats.k8sInit.End(true)
 
 	for _, grp := range option.Config.DebugVerbose {
 		switch grp {
@@ -850,6 +878,12 @@ func initEnv(cmd *cobra.Command) {
 			log.Fatalf("Envoy version %s does not match with required version %s ,aborting.",
 				envoyVersionArray[2], envoy.RequiredEnvoyVersionSHA)
 		}
+	}
+
+	// This check is here instead of in DaemonConfig.Populate (invoked at the
+	// start of this function as option.Config.Populate) to avoid an import loop.
+	if option.Config.IdentityAllocationMode == option.IdentityAllocationModeCRD && !k8s.IsEnabled() {
+		log.Fatal("CRD Identity allocation mode requires k8s to be configured.")
 	}
 
 	if option.Config.PProf {
@@ -1054,23 +1088,32 @@ func initEnv(cmd *cobra.Command) {
 		option.Config.EncryptInterface = link
 	}
 
-	// BPF masquerade specified, rejecting unsupported options for this mode.
-	if !option.Config.InstallIptRules && option.Config.Masquerade {
-		if option.Config.DatapathMode != option.DatapathModeIpvlan {
-			log.WithField(logfields.DatapathMode, option.Config.DatapathMode).
-				Fatal("BPF masquerade currently only in ipvlan datapath mode (restriction will be lifted soon)")
+	initKubeProxyReplacementOptions()
+	initSockmapOption()
+
+	if option.Config.Masquerade && option.Config.EnableBPFMasquerade {
+		// TODO(brb) nodeport + ipvlan constraints will be lifted once the SNAT BPF code has been refactored
+		if !option.Config.EnableNodePort {
+			log.Fatalf("BPF masquerade requires NodePort (--%s=\"true\")", option.EnableNodePort)
 		}
-		if option.Config.Tunnel != option.TunnelDisabled {
-			log.WithField(logfields.Tunnel, option.Config.Tunnel).
-				Fatal("BPF masquerade only in direct routing mode supported")
+		if option.Config.DatapathMode == option.DatapathModeIpvlan {
+			log.Fatalf("BPF masquerade works only in veth mode (--%s=\"veth\"", option.DatapathMode)
 		}
-		if option.Config.Device == "undefined" {
-			log.WithField(logfields.Device, option.Config.Device).
-				Fatal("BPF masquerade needs external facing device specified")
+		if option.Config.EgressMasqueradeInterfaces != "" {
+			log.Fatalf("BPF masquerade does not allow to specify devices via --%s. Use --%s instead.", option.EgressMasqueradeInterfaces, option.Device)
 		}
+	} else if option.Config.EnableIPMasqAgent {
+		log.Fatalf("BPF ip-masq-agent requires --%s=\"true\" and --%s=\"true\"", option.Masquerade, option.EnableBPFMasquerade)
 	}
 
-	initKubeProxyReplacementOptions()
+	if option.Config.EnableIPMasqAgent {
+		if !option.Config.EnableIPv4 {
+			log.Fatalf("BPF ip-masq-agent requires IPv4 support (--%s=\"true\")", option.EnableIPv4Name)
+		}
+		if !probe.HaveFullLPM() {
+			log.Fatal("BPF ip-masq-agent needs kernel 4.16 or newer")
+		}
+	}
 
 	// If device has been specified, use it to derive better default
 	// allocation prefixes
@@ -1248,6 +1291,11 @@ func runDaemon() {
 		}
 	}
 
+	if option.Config.EnableIPMasqAgent {
+		ipmasq.Start(option.Config.IPMasqAgentConfigPath,
+			option.Config.IPMasqAgentSyncPeriod)
+	}
+
 	if !option.Config.DryMode {
 		go func() {
 			if restoreComplete != nil {
@@ -1315,7 +1363,7 @@ func runDaemon() {
 
 	if k8s.IsEnabled() {
 		bootstrapStats.k8sInit.Start()
-		k8s.Client().MarkNodeReady(node.GetName())
+		k8s.Client().MarkNodeReady(nodeTypes.GetName())
 		bootstrapStats.k8sInit.End(true)
 	}
 
@@ -1436,6 +1484,21 @@ func (d *Daemon) instantiateAPI() *restapi.CiliumAPI {
 	return restAPI
 }
 
+func initSockmapOption() {
+	if !option.Config.SockopsEnable {
+		return
+	}
+	if probes.NewProbeManager().GetMapTypes().HaveSockhashMapType {
+		k := probes.NewProbeManager().GetHelpers("sock_ops")
+		h := probes.NewProbeManager().GetHelpers("sk_msg")
+		if h != nil && k != nil {
+			return
+		}
+	}
+	log.Warn("BPF Sock ops not supported by kernel. Disabling '--sockops-enable' feature.")
+	option.Config.SockopsEnable = false
+}
+
 func initKubeProxyReplacementOptions() {
 	if option.Config.KubeProxyReplacement != option.KubeProxyReplacementStrict &&
 		option.Config.KubeProxyReplacement != option.KubeProxyReplacementPartial &&
@@ -1443,6 +1506,8 @@ func initKubeProxyReplacementOptions() {
 		option.Config.KubeProxyReplacement != option.KubeProxyReplacementDisabled {
 		log.Fatalf("Invalid value for --%s: %s", option.KubeProxyReplacement, option.Config.KubeProxyReplacement)
 	}
+
+	probesManager := probes.NewProbeManager()
 
 	if option.Config.DisableK8sServices {
 		if option.Config.KubeProxyReplacement != option.KubeProxyReplacementDisabled {
@@ -1464,6 +1529,7 @@ func initKubeProxyReplacementOptions() {
 		option.Config.EnableHostReachableServices = false
 		option.Config.EnableHostServicesTCP = false
 		option.Config.EnableHostServicesUDP = false
+		option.Config.EnableSessionAffinity = false
 
 		return
 	}
@@ -1484,6 +1550,7 @@ func initKubeProxyReplacementOptions() {
 		option.Config.EnableHostReachableServices = true
 		option.Config.EnableHostServicesTCP = true
 		option.Config.EnableHostServicesUDP = true
+		option.Config.EnableSessionAffinity = true
 		option.Config.DisableK8sServices = false
 	}
 
@@ -1511,11 +1578,15 @@ func initKubeProxyReplacementOptions() {
 			option.Config.NodePortAcceleration != option.NodePortAccelerationNative {
 			log.Fatalf("Invalid value for --%s: %s", option.NodePortAcceleration, option.Config.NodePortAcceleration)
 		}
+
+		if !option.Config.NodePortBindProtection {
+			log.Warning("NodePort BPF configured without bind(2) protection against service ports")
+		}
 	}
 
 	if option.Config.EnableNodePort {
 		found := false
-		if h := probes.NewProbeManager().GetHelpers("sched_act"); h != nil {
+		if h := probesManager.GetHelpers("sched_act"); h != nil {
 			if _, ok := h["bpf_fib_lookup"]; ok {
 				found = true
 			}
@@ -1565,6 +1636,11 @@ func initKubeProxyReplacementOptions() {
 
 	if option.Config.EnableNodePort &&
 		option.Config.NodePortAcceleration != option.NodePortAccelerationNone {
+		if option.Config.Tunnel != option.TunnelDisabled {
+			log.Fatalf("Cannot use NodePort acceleration with tunneling. Either run cilium-agent with --%s=%s or --%s=%s",
+				option.NodePortAcceleration, option.NodePortAccelerationNone, option.TunnelName, option.TunnelDisabled)
+		}
+
 		if option.Config.XDPDevice != "undefined" &&
 			option.Config.XDPDevice != option.Config.Device {
 			log.Fatalf("Cannot set NodePort acceleration device: mismatch between Prefilter device %s and NodePort device %s",
@@ -1621,6 +1697,33 @@ func initKubeProxyReplacementOptions() {
 			log.Warnf("Disabling NodePort's %q mode feature due to tunneling mode being enabled",
 				option.Config.NodePortMode)
 			option.Config.NodePortMode = option.NodePortModeSNAT
+		}
+	}
+
+	if option.Config.EnableSessionAffinity {
+		if !probesManager.GetMapTypes().HaveLruHashMapType {
+			msg := "SessionAffinity feature requires BPF LRU maps"
+			if strict {
+				log.Fatal(msg)
+			} else {
+				log.Warn(fmt.Sprintf("%s. Disabling the feature.", msg))
+				option.Config.EnableSessionAffinity = false
+			}
+
+		}
+	}
+
+	if option.Config.EnableSessionAffinity && option.Config.EnableHostReachableServices {
+		found1, found2 := false, false
+		if h := probesManager.GetHelpers("cgroup_sock"); h != nil {
+			_, found1 = h["bpf_get_netns_cookie"]
+		}
+		if h := probesManager.GetHelpers("cgroup_sock_addr"); h != nil {
+			_, found2 = h["bpf_get_netns_cookie"]
+		}
+		if !(found1 && found2) {
+			log.Warnf("sessionAffinity for host reachable services needs kernel 5.7.0 or newer. " +
+				"Disabling sessionAffinity for cases when a service is accessed from a cluster.")
 		}
 	}
 }

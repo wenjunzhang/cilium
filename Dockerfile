@@ -2,6 +2,8 @@
 # cilium-envoy from github.com/cilium/proxy
 #
 FROM quay.io/cilium/cilium-envoy:a3385205ad620550b35d3b0b651e40898386e6e3 as cilium-envoy
+ARG CILIUM_SHA=""
+LABEL cilium-sha=${CILIUM_SHA}
 
 #
 # Cilium incremental build. Should be fast given builder-deps is up-to-date!
@@ -14,6 +16,8 @@ FROM quay.io/cilium/cilium-envoy:a3385205ad620550b35d3b0b651e40898386e6e3 as cil
 # that are not backwards compatible.
 #
 FROM quay.io/cilium/cilium-builder:2020-04-16 as builder
+ARG CILIUM_SHA=""
+LABEL cilium-sha=${CILIUM_SHA}
 LABEL maintainer="maintainer@cilium.io"
 WORKDIR /go/src/github.com/cilium/cilium
 COPY . ./
@@ -37,7 +41,9 @@ RUN make LOCKDEBUG=$LOCKDEBUG PKG_BUILD=1 V=$V LIBNETWORK_PLUGIN=$LIBNETWORK_PLU
 # built while allowing the new versions to make changes that are not
 # backwards compatible.
 #
-FROM quay.io/cilium/cilium-runtime:2020-04-16
+FROM quay.io/cilium/cilium-runtime:2020-04-22
+ARG CILIUM_SHA=""
+LABEL cilium-sha=${CILIUM_SHA}
 LABEL maintainer="maintainer@cilium.io"
 COPY --from=builder /tmp/install /
 COPY --from=cilium-envoy / /

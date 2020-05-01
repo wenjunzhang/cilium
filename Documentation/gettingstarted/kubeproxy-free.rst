@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 .. _kubeproxy-free:
 
@@ -15,7 +15,7 @@ and to use Cilium to fully replace it. For simplicity, we will use ``kubeadm`` t
 bootstrap the cluster.
 
 For installing ``kubeadm`` and for more provisioning options please refer to
-`the official kubeadm documentation <https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/create-cluster-kubeadm>`__.
+`the official kubeadm documentation <https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/create-cluster-kubeadm/>`_.
 
 .. note::
 
@@ -262,9 +262,20 @@ Another advantage in DSR mode is that the client's source IP is preserved, so po
 can match on it at the backend node. In the SNAT mode this is not possible.
 Given a specific backend can be used by multiple services, the backends need to be
 made aware of the service IP/port which they need to reply with. Therefore, Cilium
-encodes this information as an IPv4 option or IPv6 extension header at the cost of
-advertising a lower MTU. For TCP services, Cilium only encodes the service IP/port
-for the SYN packet.
+encodes this information in a Cilium-specific IPv4 option or IPv6 Destination Option
+extension header at the cost of advertising a lower MTU. For TCP services, Cilium
+only encodes the service IP/port for the SYN packet, but not subsequent ones. The
+latter also allows to operate Cilium in a hybrid mode as detailed in the next subsection
+where DSR is used for TCP and SNAT for UDP in order to avoid an otherwise needed MTU
+reduction.
+
+Note that usage of DSR mode might not work in some public cloud provider environments
+due to the Cilium-specific IP options that could be dropped by an underlying fabric.
+Therefore, in case of connectivity issues to services where backends are located on
+a remote node from the node that is processing the given NodePort request, it is
+advised to first check whether the NodePort request actually arrived on the node
+containing the backend. If this was not the case, then switching back to the default
+SNAT mode would be advised as a workaround.
 
 Above helm example configuration in a kube-proxy-free environment with DSR-only mode
 enabled would look as follows:
@@ -290,7 +301,8 @@ through the removed extra hop for replies, in particular, when TCP is the main t
 for workloads.
 
 The mode setting ``global.nodePort.mode`` allows to control the behavior through the
-options ``dsr``, ``snat`` and ``hybrid``.
+options ``dsr``, ``snat`` and ``hybrid``. By default the ``snat`` mode is used in the
+agent.
 
 A helm example configuration in a kube-proxy-free environment with DSR enabled in hybrid
 mode would look as follows:
@@ -302,6 +314,7 @@ mode would look as follows:
         --set global.tunnel=disabled \\
         --set global.autoDirectNodeRoutes=true \\
         --set global.kubeProxyReplacement=strict \\
+        --set global.nodePort.mode=hybrid \\
         --set global.k8sServiceHost=API_SERVER_IP \\
         --set global.k8sServicePort=API_SERVER_PORT
 
@@ -321,7 +334,7 @@ acceleration. The majority of drivers supporting 10G or higher rates also suppor
 have SR-IOV variants that support native XDP as well.
 
 The ``global.nodePort.acceleration`` setting is supported for DSR, SNAT and hybrid
-modes and can be enabled as follows for ``nodePort.mode=dsr`` in this example:
+modes and can be enabled as follows for ``nodePort.mode=hybrid`` in this example:
 
 .. parsed-literal::
 
@@ -331,7 +344,7 @@ modes and can be enabled as follows for ``nodePort.mode=dsr`` in this example:
         --set global.autoDirectNodeRoutes=true \\
         --set global.kubeProxyReplacement=strict \\
         --set global.nodePort.acceleration=native \\
-        --set global.nodePort.mode=dsr \\
+        --set global.nodePort.mode=hybrid \\
         --set global.k8sServiceHost=API_SERVER_IP \\
         --set global.k8sServicePort=API_SERVER_PORT
 
@@ -343,8 +356,8 @@ the ``cilium status`` CLI command:
     kubectl exec -it -n kube-system cilium-xxxxx -- cilium status | grep KubeProxyReplacement
     KubeProxyReplacement:   Strict   [NodePort (SNAT, 30000-32767, XDP: NATIVE), HostPort, ExternalIPs, HostReachableServices (TCP, UDP)]
 
-NodePort Device and Range
-*************************
+NodePort Device, Port and Bind settings
+***************************************
 
 When running Cilium's BPF kube-proxy replacement, by default, a NodePort or
 ExternalIPs service will be accessible through the IP address of a native device
@@ -352,7 +365,7 @@ which has the default route on the host. To change the device, set its name in
 the ``global.nodePort.device`` helm option.
 
 In addition, thanks to the :ref:`host-services` feature, the NodePort service can
-be accessed by default from a host or a Pod within a cluster via it's public,
+be accessed by default from a host or a pod within a cluster via it's public,
 cilium_host device or loopback address, e.g. ``127.0.0.1:NODE_PORT``.
 
 If ``kube-apiserver`` was configured to use a non-default NodePort port range,
@@ -366,6 +379,14 @@ the reserved ports (``net.ipv4.ip_local_reserved_ports``). This is needed to
 prevent a NodePort service from hijacking traffic of a host local application
 which source port matches the service port. To disable the modification of
 the reserved ports, set ``global.nodePort.autoProtectPortRanges`` to ``false``.
+
+By default, the NodePort implementation prevents application ``bind(2)`` requests
+to NodePort service ports. In such case, the application will typically see a
+``bind: Operation not permitted`` error. This happens either globally for older
+kernels or starting from v5.7 kernels only for the host namespace by default
+and therefore not affecting any application pod ``bind(2)`` requests anymore. In
+order to opt-out from this behavior in general, this setting can be changed for
+expert users by switching ``global.nodePort.bindProtection`` to ``false``.
 
 Container hostPort support
 **************************
@@ -592,12 +613,24 @@ Limitations
       which uses BPF cgroup hooks to implement the service translation. The getpeername(2)
       hook is currently missing which will be addressed for newer kernels. It is known
       to currently not work with libceph deployments.
-    * Cilium in general currently does not support IP de-/fragmentation. This also includes
-      the BPF kube-proxy replacement. Meaning, while the first packet with L4 header will
-      reach the backend, all subsequent packets will not due to service lookup failing.
-      This will be addressed via `GH issue 10076 <https://github.com/cilium/cilium/issues/10076>`__.
     * Cilium's DSR NodePort mode currently does not operate well in environments with
       TCP Fast Open (TFO) enabled. It is recommended to switch to ``snat`` mode in this
       situation.
     * Kubernetes Service sessionAffinity is currently not implemented.
       This will be addressed via `GH issue 9076 <https://github.com/cilium/cilium/issues/9076>`__.
+
+Further Readings
+################
+
+The following presentations describe inner-workings of the kube-proxy replacement in BPF
+in great details:
+
+    * "Liberating Kubernetes from kube-proxy and iptables" (KubeCon North America 2019, `slides
+      <https://docs.google.com/presentation/d/1cZJ-pcwB9WG88wzhDm2jxQY4Sh8adYg0-N3qWQ8593I/edit>`__,
+      `video <https://www.youtube.com/watch?v=bIRwSIwNHC0>`__)
+    * "BPF as a revolutionary technology for the container landscape" (Fosdem 2020, `slides
+      <https://docs.google.com/presentation/d/1VOUcoIxgM_c6M_zAV1dLlRCjyYCMdR3tJv6CEdfLMh8/edit>`__,
+      `video <https://fosdem.org/2020/schedule/event/containers_bpf/>`__)
+    * "Kernel improvements for Cilium socket LB" (LSF/MM/BPF 2020, `slides
+      <https://docs.google.com/presentation/d/1w2zlpGWV7JUhHYd37El_AUZzyUNSvDfktrF5MJ5G8Bs/edit#slide=id.g746fc02b5b_2_0>`__)
+

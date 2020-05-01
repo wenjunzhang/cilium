@@ -47,6 +47,16 @@ struct bpf_elf_map __section_maps LB6_BACKEND_MAP = {
 	.flags          = CONDITIONAL_PREALLOC,
 };
 
+#ifdef ENABLE_SESSION_AFFINITY
+struct bpf_elf_map __section_maps LB6_AFFINITY_MAP = {
+	.type		= BPF_MAP_TYPE_LRU_HASH,
+	.size_key	= sizeof(struct lb6_affinity_key),
+	.size_value	= sizeof(struct lb_affinity_val),
+	.pinning	= PIN_GLOBAL_NS,
+	.max_elem	= CILIUM_LB_MAP_MAX_ENTRIES,
+};
+#endif
+
 #endif /* ENABLE_IPV6 */
 
 #ifdef ENABLE_IPV4
@@ -77,8 +87,28 @@ struct bpf_elf_map __section_maps LB4_BACKEND_MAP = {
 	.flags          = CONDITIONAL_PREALLOC,
 };
 
+#ifdef ENABLE_SESSION_AFFINITY
+struct bpf_elf_map __section_maps LB4_AFFINITY_MAP = {
+	.type		= BPF_MAP_TYPE_LRU_HASH,
+	.size_key	= sizeof(struct lb4_affinity_key),
+	.size_value	= sizeof(struct lb_affinity_val),
+	.pinning	= PIN_GLOBAL_NS,
+	.max_elem	= CILIUM_LB_MAP_MAX_ENTRIES,
+};
+#endif
+
 #endif /* ENABLE_IPV4 */
 
+#ifdef ENABLE_SESSION_AFFINITY
+struct bpf_elf_map __section_maps LB_AFFINITY_MATCH_MAP = {
+	.type		= BPF_MAP_TYPE_HASH,
+	.size_key	= sizeof(struct lb_affinity_match),
+	.size_value	= sizeof(__u8), /* dummy value, map is used as a set */
+	.pinning	= PIN_GLOBAL_NS,
+	.max_elem	= CILIUM_LB_MAP_MAX_ENTRIES,
+	.flags		= CONDITIONAL_PREALLOC,
+};
+#endif
 
 #define REV_NAT_F_TUPLE_SADDR 1
 #ifdef LB_DEBUG
@@ -418,8 +448,8 @@ static __always_inline int lb6_xlate(struct __ctx_buff *ctx,
 				     union v6addr *new_dst, __u8 nexthdr __maybe_unused,
 				     int l3_off, int l4_off,
 				     struct csum_offset *csum_off,
-				     struct lb6_key *key,
-				     struct lb6_backend *backend __maybe_unused)
+				     const struct lb6_key *key,
+				     const struct lb6_backend *backend __maybe_unused)
 {
 	ipv6_store_daddr(ctx, new_dst->addr, l3_off);
 
@@ -445,12 +475,72 @@ static __always_inline int lb6_xlate(struct __ctx_buff *ctx,
 	return CTX_ACT_OK;
 }
 
+#ifdef ENABLE_SESSION_AFFINITY
+static __always_inline
+__u32 lb6_affinity_backend_id(__u16 rev_nat_id,
+			      __u32 svc_affinity_timeout,
+			      bool netns_cookie,
+			      union lb6_affinity_client_id *client_id)
+{
+	__u32 now = bpf_ktime_get_sec();
+	struct lb_affinity_match match = { .rev_nat_id = rev_nat_id };
+	struct lb_affinity_val *val;
+	struct lb6_affinity_key key = {	.netns_cookie = netns_cookie,
+					.rev_nat_id = rev_nat_id };
+
+	ipv6_addr_copy(&key.client_id.client_ip, &client_id->client_ip);
+	val = map_lookup_elem(&LB6_AFFINITY_MAP, &key);
+	if (val != NULL) {
+		if ((val->last_used + svc_affinity_timeout) < now) {
+			map_delete_elem(&LB6_AFFINITY_MAP, &key);
+			return 0;
+		}
+
+		match.backend_id = val->backend_id;
+		if (map_lookup_elem(&LB_AFFINITY_MATCH_MAP, &match) == NULL) {
+			map_delete_elem(&LB6_AFFINITY_MAP, &key);
+			return 0;
+		}
+
+		return val->backend_id;
+	}
+
+	return 0;
+}
+
+static __always_inline
+void lb6_update_affinity(__u16 rev_nat_id, bool netns_cookie,
+			 union lb6_affinity_client_id *client_id,
+			 __u32 backend_id)
+{
+	__u32 now = bpf_ktime_get_sec();
+	struct lb6_affinity_key key = {	.rev_nat_id = rev_nat_id,
+					.netns_cookie = netns_cookie };
+	struct lb_affinity_val val = { .last_used = now,
+					.backend_id = backend_id };
+
+	ipv6_addr_copy(&key.client_id.client_ip, &client_id->client_ip);
+	map_update_elem(&LB6_AFFINITY_MAP, &key, &val, 0);
+}
+
+static __always_inline
+void lb6_delete_affinity(__u16 rev_nat_id, bool netns_cookie,
+			 union lb6_affinity_client_id *client_id)
+{
+	struct lb6_affinity_key key = {	.rev_nat_id = rev_nat_id,
+					.netns_cookie = netns_cookie };
+
+	ipv6_addr_copy(&key.client_id.client_ip, &client_id->client_ip);
+	map_delete_elem(&LB6_AFFINITY_MAP, &key);
+}
+#endif /* ENABLE_SESSION_AFFINITY */
+
 static __always_inline int lb6_local(const void *map, struct __ctx_buff *ctx,
 				     int l3_off, int l4_off,
 				     struct csum_offset *csum_off,
 				     struct lb6_key *key,
 				     struct ipv6_ct_tuple *tuple,
-				     struct lb6_service *svc,
+				     const struct lb6_service *svc,
 				     struct ct_state *state)
 {
 	__u32 monitor; // Deliberately ignored; regular CT will determine monitoring.
@@ -459,22 +549,47 @@ static __always_inline int lb6_local(const void *map, struct __ctx_buff *ctx,
 	struct lb6_backend *backend;
 	struct lb6_service *slave_svc;
 	int slave;
+	__u32 backend_id = 0;
+	bool backend_from_affinity = false;
 	int ret;
+#ifdef ENABLE_SESSION_AFFINITY
+	union lb6_affinity_client_id client_id;
+	ipv6_addr_copy(&client_id.client_ip, &tuple->saddr);
+#endif
 
 	/* See lb4_local comments re svc endpoint lookup process */
 
 	ret = ct_lookup6(map, tuple, ctx, l4_off, CT_SERVICE, state, &monitor);
 	switch(ret) {
 	case CT_NEW:
-		slave = lb6_select_slave(svc->count);
-		if ((slave_svc = lb6_lookup_slave(ctx, key, slave)) == NULL) {
-			goto drop_no_service;
+#ifdef ENABLE_SESSION_AFFINITY
+		if (svc->affinity) {
+			backend_id = lb6_affinity_backend_id(svc->rev_nat_index,
+							     svc->affinity_timeout,
+							     false, &client_id);
+			if (backend_id != 0) {
+				backend_from_affinity = true;
+				backend = lb6_lookup_backend(ctx, backend_id);
+				if (backend == NULL) {
+					lb6_delete_affinity(svc->rev_nat_index, false, &client_id);
+					backend_id = 0;
+				}
+			}
 		}
-		backend = lb6_lookup_backend(ctx, slave_svc->backend_id);
-		if (backend == NULL) {
-			goto drop_no_service;
+#endif
+		if (backend_id == 0) {
+			backend_from_affinity = false;
+			slave = lb6_select_slave(svc->count);
+			if ((slave_svc = lb6_lookup_slave(ctx, key, slave)) == NULL) {
+				goto drop_no_service;
+			}
+			backend_id = slave_svc->backend_id;
+			backend = lb6_lookup_backend(ctx, slave_svc->backend_id);
+			if (backend == NULL)
+				goto drop_no_service;
 		}
-		state->backend_id = slave_svc->backend_id;
+
+		state->backend_id = backend_id;
 		state->rev_nat_index = svc->rev_nat_index;
 		ret = ct_create6(map, NULL, tuple, ctx, CT_SERVICE, state, false);
 		/* Fail closed, if the conntrack entry create fails drop
@@ -499,13 +614,23 @@ static __always_inline int lb6_local(const void *map, struct __ctx_buff *ctx,
 
 	// See lb4_local comment
 	if (state->rev_nat_index != svc->rev_nat_index) {
-		cilium_dbg_lb(ctx, DBG_LB_STALE_CT, svc->rev_nat_index,
-			      state->rev_nat_index);
-		slave = lb6_select_slave(svc->count);
-		if (!(slave_svc = lb6_lookup_slave(ctx, key, slave))) {
-			goto drop_no_service;
+#ifdef ENABLE_SESSION_AFFINITY
+		if (svc->affinity) {
+			backend_id = lb6_affinity_backend_id(svc->rev_nat_index,
+							     svc->affinity_timeout,
+							     false, &client_id);
+			backend_from_affinity = true;
 		}
-		state->backend_id = slave_svc->backend_id;
+#endif
+		if (backend_id == 0) {
+			slave = lb6_select_slave(svc->count);
+			if (!(slave_svc = lb6_lookup_slave(ctx, key, slave))) {
+				goto drop_no_service;
+			}
+			backend_id = slave_svc->backend_id;
+		}
+
+		state->backend_id = backend_id;
 		ct_update6_backend_id(map, tuple, state);
 		state->rev_nat_index = svc->rev_nat_index;
 		ct_update6_rev_nat_index(map, tuple, state);
@@ -515,6 +640,13 @@ static __always_inline int lb6_local(const void *map, struct __ctx_buff *ctx,
 	 * session we are likely to get a TCP RST.
 	 */
 	if (!(backend = lb6_lookup_backend(ctx, state->backend_id))) {
+/* NOTE(brb): Can't enable the removal for newer kernels, as otherwise
+ * the verifier hits 1mln insn limit. Hovewer, the removal of the affinity
+ * in this case is just an optimization. */
+#if defined(ENABLE_SESSION_AFFINITY) && !defined(HAVE_LARGE_INSN_LIMIT)
+		if (backend_from_affinity)
+			lb6_delete_affinity(svc->rev_nat_index, false, &client_id);
+#endif
 		key->slave = 0;
 		if (!(svc = lb6_lookup_service(key))) {
 			goto drop_no_service;
@@ -539,6 +671,13 @@ update_state:
 	ipv6_addr_copy(&tuple->daddr, &backend->address);
 	addr = &tuple->daddr;
 	state->rev_nat_index = svc->rev_nat_index;
+
+#ifdef ENABLE_SESSION_AFFINITY
+	if (svc->affinity) {
+		lb6_update_affinity(svc->rev_nat_index, false, &client_id,
+				    state->backend_id);
+	}
+#endif
 
 	return lb6_xlate(ctx, addr, tuple->nexthdr, l3_off, l4_off,
 			 csum_off, key, backend);
@@ -574,8 +713,8 @@ __lb6_lookup_backend(__u16 backend_id __maybe_unused)
 static __always_inline int __lb4_rev_nat(struct __ctx_buff *ctx, int l3_off, int l4_off,
 					 struct csum_offset *csum_off,
 					 struct ipv4_ct_tuple *tuple, int flags,
-					 struct lb4_reverse_nat *nat,
-					 struct ct_state *ct_state)
+					 const struct lb4_reverse_nat *nat,
+					 const struct ct_state *ct_state)
 {
 	__be32 old_sip, new_sip, sum = 0;
 	int ret;
@@ -775,7 +914,7 @@ lb4_xlate(struct __ctx_buff *ctx, __be32 *new_daddr, __be32 *new_saddr,
 	     __be32 *old_saddr, __u8 nexthdr __maybe_unused,
 	     int l3_off, int l4_off,
 	     struct csum_offset *csum_off, struct lb4_key *key,
-	     struct lb4_backend *backend __maybe_unused)
+	     const struct lb4_backend *backend __maybe_unused)
 {
 	int ret;
 	__be32 sum;
@@ -817,12 +956,72 @@ lb4_xlate(struct __ctx_buff *ctx, __be32 *new_daddr, __be32 *new_saddr,
 	return CTX_ACT_OK;
 }
 
+#ifdef ENABLE_SESSION_AFFINITY
+static __always_inline
+__u32 lb4_affinity_backend_id(__u16 rev_nat_id,
+			    __u32 svc_affinity_timeout,
+			    bool netns_cookie,
+			    union lb4_affinity_client_id client_id)
+{
+	__u32 now = bpf_ktime_get_sec();
+	struct lb_affinity_match match = { .rev_nat_id = rev_nat_id };
+	struct lb_affinity_val *val;
+	struct lb4_affinity_key key = {	.client_id = client_id,
+					.netns_cookie = netns_cookie,
+					.rev_nat_id = rev_nat_id };
+
+	val = map_lookup_elem(&LB4_AFFINITY_MAP, &key);
+	if (val != NULL) {
+		if ((val->last_used + svc_affinity_timeout) < now) {
+			map_delete_elem(&LB4_AFFINITY_MAP, &key);
+			return 0;
+		}
+
+		match.backend_id = val->backend_id;
+		if (map_lookup_elem(&LB_AFFINITY_MATCH_MAP, &match) == NULL) {
+			map_delete_elem(&LB4_AFFINITY_MAP, &key);
+			return 0;
+		}
+
+		return val->backend_id;
+	}
+
+	return 0;
+}
+
+static __always_inline
+void lb4_update_affinity(__u16 rev_nat_id, bool netns_cookie,
+			 union lb4_affinity_client_id client_id,
+			 __u32 backend_id)
+{
+	__u32 now = bpf_ktime_get_sec();
+	struct lb4_affinity_key key = {	.rev_nat_id = rev_nat_id,
+					.netns_cookie = netns_cookie,
+					.client_id = client_id };
+	struct lb_affinity_val val = { .last_used = now,
+					.backend_id = backend_id };
+
+	map_update_elem(&LB4_AFFINITY_MAP, &key, &val, 0);
+}
+
+static __always_inline
+void lb4_delete_affinity(__u16 rev_nat_id, bool netns_cookie,
+			 union lb4_affinity_client_id client_id)
+{
+	struct lb4_affinity_key key = {	.rev_nat_id = rev_nat_id,
+					.netns_cookie = netns_cookie,
+					.client_id = client_id };
+
+	map_delete_elem(&LB4_AFFINITY_MAP, &key);
+}
+#endif /* ENABLE_SESSION_AFFINITY */
+
 static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
 				     int l3_off, int l4_off,
 				     struct csum_offset *csum_off,
 				     struct lb4_key *key,
 				     struct ipv4_ct_tuple *tuple,
-				     struct lb4_service *svc,
+				     const struct lb4_service *svc,
 				     struct ct_state *state, __be32 saddr)
 {
 	__u32 monitor; // Deliberately ignored; regular CT will determine monitoring.
@@ -831,21 +1030,46 @@ static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
 	struct lb4_backend *backend;
 	struct lb4_service *slave_svc;
 	int slave;
+	__u32 backend_id = 0;
+	bool backend_from_affinity = false;
 	int ret;
+#ifdef ENABLE_SESSION_AFFINITY
+	union lb4_affinity_client_id client_id = { .client_ip = saddr };
+#endif
 
 	ret = ct_lookup4(map, tuple, ctx, l4_off, CT_SERVICE, state, &monitor);
 	switch(ret) {
 	case CT_NEW:
-		/* No CT entry has been found, so select a svc endpoint */
-		slave = lb4_select_slave(svc->count);
-		if ((slave_svc = lb4_lookup_slave(ctx, key, slave)) == NULL) {
-			goto drop_no_service;
+#ifdef ENABLE_SESSION_AFFINITY
+		if (svc->affinity) {
+			backend_id = lb4_affinity_backend_id(svc->rev_nat_index,
+							     svc->affinity_timeout,
+							     false, client_id);
+			if (backend_id != 0) {
+				backend_from_affinity = true;
+				backend = lb4_lookup_backend(ctx, backend_id);
+				if (backend == NULL) {
+					lb4_delete_affinity(svc->rev_nat_index, false, client_id);
+					backend_id = 0;
+				}
+			}
 		}
-		backend = lb4_lookup_backend(ctx, slave_svc->backend_id);
-		if (backend == NULL) {
-			goto drop_no_service;
+#endif
+
+		if (backend_id == 0) {
+			backend_from_affinity = false;
+			/* No CT entry has been found, so select a svc endpoint */
+			slave = lb4_select_slave(svc->count);
+			if ((slave_svc = lb4_lookup_slave(ctx, key, slave)) == NULL) {
+				goto drop_no_service;
+			}
+			backend_id = slave_svc->backend_id;
+			backend = lb4_lookup_backend(ctx, backend_id);
+			if (backend == NULL)
+				goto drop_no_service;
 		}
-		state->backend_id = slave_svc->backend_id;
+
+		state->backend_id = backend_id;
 		state->rev_nat_index = svc->rev_nat_index;
 		ret = ct_create4(map, NULL, tuple, ctx, CT_SERVICE, state, false);
 		/* Fail closed, if the conntrack entry create fails drop
@@ -879,13 +1103,24 @@ static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
 	// To avoid this, check that reverse NAT indices match. If not,
 	// select a new backend.
 	if (state->rev_nat_index != svc->rev_nat_index) {
-		cilium_dbg_lb(ctx, DBG_LB_STALE_CT, svc->rev_nat_index,
-			      state->rev_nat_index);
-		slave = lb4_select_slave(svc->count);
-		if (!(slave_svc = lb4_lookup_slave(ctx, key, slave))) {
-			goto drop_no_service;
+#ifdef ENABLE_SESSION_AFFINITY
+		if (svc->affinity) {
+			backend_id = lb4_affinity_backend_id(svc->rev_nat_index,
+							     svc->affinity_timeout,
+							     false, client_id);
+			backend_from_affinity = true;
 		}
-		state->backend_id = slave_svc->backend_id;
+#endif
+
+		if (backend_id == 0) {
+			slave = lb4_select_slave(svc->count);
+			if (!(slave_svc = lb4_lookup_slave(ctx, key, slave))) {
+				goto drop_no_service;
+			}
+			backend_id = slave_svc->backend_id;
+		}
+
+		state->backend_id = backend_id;
 		ct_update4_backend_id(map, tuple, state);
 		state->rev_nat_index = svc->rev_nat_index;
 		ct_update4_rev_nat_index(map, tuple, state);
@@ -895,6 +1130,10 @@ static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
 	 * session we are likely to get a TCP RST.
 	 */
 	if (!(backend = lb4_lookup_backend(ctx, state->backend_id))) {
+#ifdef ENABLE_SESSION_AFFINITY
+		if (backend_from_affinity)
+			lb4_delete_affinity(svc->rev_nat_index, false, client_id);
+#endif
 		key->slave = 0;
 		if (!(svc = lb4_lookup_service(key))) {
 			goto drop_no_service;
@@ -918,6 +1157,13 @@ update_state:
 	tuple->flags = flags;
 	state->rev_nat_index = svc->rev_nat_index;
 	state->addr = new_daddr = backend->address;
+
+#ifdef ENABLE_SESSION_AFFINITY
+	if (svc->affinity) {
+		lb4_update_affinity(svc->rev_nat_index, false, client_id,
+				    state->backend_id);
+	}
+#endif
 
 #ifndef DISABLE_LOOPBACK_LB
 	/* Special loopback case: The origin endpoint has transmitted to a

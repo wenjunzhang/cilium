@@ -45,8 +45,8 @@ var _ = Describe("K8sPolicyTest", func() {
 		l7PolicyKafka        string
 		l7PolicyTLS          string
 		TLSCaCerts           string
-		TLSSWapiCrt          string
-		TLSSWapiKey          string
+		TLSArtiiCrt          string
+		TLSArtiiKey          string
 		TLSLyftCrt           string
 		TLSLyftKey           string
 		TLSCa                string
@@ -76,8 +76,8 @@ var _ = Describe("K8sPolicyTest", func() {
 		l7PolicyKafka = helpers.ManifestGet(kubectl.BasePath(), "l7-policy-kafka.yaml")
 		l7PolicyTLS = helpers.ManifestGet(kubectl.BasePath(), "l7-policy-TLS.yaml")
 		TLSCaCerts = helpers.ManifestGet(kubectl.BasePath(), "testCA.crt")
-		TLSSWapiCrt = helpers.ManifestGet(kubectl.BasePath(), "internal-swapi.crt")
-		TLSSWapiKey = helpers.ManifestGet(kubectl.BasePath(), "internal-swapi.key")
+		TLSArtiiCrt = helpers.ManifestGet(kubectl.BasePath(), "internal-artii.crt")
+		TLSArtiiKey = helpers.ManifestGet(kubectl.BasePath(), "internal-artii.key")
 		TLSLyftCrt = helpers.ManifestGet(kubectl.BasePath(), "internal-lyft.crt")
 		TLSLyftKey = helpers.ManifestGet(kubectl.BasePath(), "internal-lyft.key")
 		TLSCa = helpers.ManifestGet(kubectl.BasePath(), "ca.crt")
@@ -310,8 +310,8 @@ var _ = Describe("K8sPolicyTest", func() {
 			res = kubectl.CreateSecret("generic", "test-client", "default", "--from-file="+TLSCa)
 			res.ExpectSuccess("Cannot create secret %s", "test-client")
 
-			res = kubectl.CreateSecret("tls", "swapi-server", "default", "--cert="+TLSSWapiCrt+" --key="+TLSSWapiKey)
-			res.ExpectSuccess("Cannot create secret %s", "swapi-server")
+			res = kubectl.CreateSecret("tls", "artii-server", "default", "--cert="+TLSArtiiCrt+" --key="+TLSArtiiKey)
+			res.ExpectSuccess("Cannot create secret %s", "artii-server")
 
 			res = kubectl.CreateSecret("tls", "lyft-server", "default", "--cert="+TLSLyftCrt+" --key="+TLSLyftKey)
 			res.ExpectSuccess("Cannot create secret %s", "lyft-server")
@@ -325,14 +325,14 @@ var _ = Describe("K8sPolicyTest", func() {
 
 			res = kubectl.ExecPodCmd(
 				namespaceForTest, appPods[helpers.App2],
-				helpers.CurlFail("--retry 5 -4 --max-time 15 %s https://swapi.co:443/api/planets/1/", "-v --cacert /cacert.pem"))
-			res.ExpectSuccess("Cannot connect from %q to 'https://swapi.co:443/api/planets/1/'",
+				helpers.CurlFail("--retry 5 -4 --max-time 15 %s 'https://artii.herokuapp.com/make?text=cilium&font=univers'", "-v --cacert /cacert.pem"))
+			res.ExpectSuccess("Cannot connect from %q to 'https://artii.herokuapp.com/make?text=cilium&font=univers'",
 				appPods[helpers.App2])
 
 			res = kubectl.ExecPodCmd(
 				namespaceForTest, appPods[helpers.App2],
-				helpers.CurlFail("--retry 5 -4 %s https://swapi.co:443/api/planets/2/", "-v --cacert /cacert.pem"))
-			res.ExpectFailWithError("403 Forbidden", "Unexpected connection from %q to 'https://swapi.co:443/api/planets/2/'",
+				helpers.CurlFail("--retry 5 -4 %s 'https://artii.herokuapp.com:443/fonts_list'", "-v --cacert /cacert.pem"))
+			res.ExpectFailWithError("403 Forbidden", "Unexpected connection from %q to 'https://artii.herokuapp.com:443/fonts_list'",
 				appPods[helpers.App2])
 
 			res = kubectl.ExecPodCmd(
@@ -1002,6 +1002,7 @@ var _ = Describe("K8sPolicyTest", func() {
 			var (
 				cnpFromEntitiesHost       string
 				cnpFromEntitiesRemoteNode string
+				cnpFromEntitiesWorld      string
 				// TODO: Add fromEntities tests (GH-10979)
 				//cnpFromEntitiesCluster    string
 				//cnpFromEntitiesWorld      string
@@ -1014,6 +1015,7 @@ var _ = Describe("K8sPolicyTest", func() {
 			BeforeAll(func() {
 				cnpFromEntitiesHost = helpers.ManifestGet(kubectl.BasePath(), "cnp-from-entities-host.yaml")
 				cnpFromEntitiesRemoteNode = helpers.ManifestGet(kubectl.BasePath(), "cnp-from-entities-remote-node.yaml")
+				cnpFromEntitiesWorld = helpers.ManifestGet(kubectl.BasePath(), "cnp-from-entities-world.yaml")
 				k8s1Name, _ = kubectl.GetNodeInfo(helpers.K8s1)
 				k8s2Name, _ = kubectl.GetNodeInfo(helpers.K8s2)
 				_, k8s1PodIP = kubectl.GetPodOnNodeWithOffset(k8s1Name, testDS, 0)
@@ -1061,8 +1063,22 @@ var _ = Describe("K8sPolicyTest", func() {
 				})
 
 				It("Allows from all hosts with cnp fromEntities host policy", func() {
-					By("Installing fromEntities host policy")
-					importPolicy(cnpFromEntitiesHost, "from-entities-host")
+					if helpers.NativeRoutingEnabled() {
+						// When running native-routing mode,
+						// the source IP from host traffic is
+						// unlikely the IP assigned to the
+						// cilium-host interface. In the
+						// remote-node identity legacy mode,
+						// only the IP of the cilium-host
+						// interface is considered host. All
+						// other IPs are considered world.
+						By("Installing fromEntities host and world policy")
+						importPolicy(cnpFromEntitiesWorld, "from-entities-world")
+						importPolicy(cnpFromEntitiesHost, "from-entities-host")
+					} else {
+						By("Installing fromEntities host policy")
+						importPolicy(cnpFromEntitiesHost, "from-entities-host")
+					}
 
 					By("Checking policy correctness")
 					validateNodeConnectivity(HostConnectivityAllow, RemoteNodeConnectivityAllow)

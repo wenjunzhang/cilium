@@ -20,7 +20,7 @@ bpf_clear_meta(struct __sk_buff *ctx)
  * get_identity - returns source identity from the mark field
  */
 static __always_inline __maybe_unused int
-get_identity(struct __sk_buff *ctx)
+get_identity(const struct __sk_buff *ctx)
 {
 	return ((ctx->mark & 0xFF) << 16) | ctx->mark >> 16;
 }
@@ -63,7 +63,7 @@ set_encrypt_key_meta(struct __sk_buff *ctx, __u8 key)
 }
 
 static __always_inline __maybe_unused int
-redirect_self(struct __sk_buff *ctx)
+redirect_self(const struct __sk_buff *ctx)
 {
 	/* Looping back the packet into the originating netns. In
 	 * case of veth, it's xmit'ing into the hosts' veth device
@@ -104,6 +104,20 @@ ctx_skip_nodeport(struct __sk_buff *ctx __maybe_unused)
 #else
 	return true;
 #endif
+}
+
+static __always_inline __maybe_unused __u32 ctx_get_xfer(struct __sk_buff *ctx)
+{
+	__u32 *data_meta = ctx_data_meta(ctx);
+	void *data = ctx_data(ctx);
+
+	return !ctx_no_room(data_meta + 1, data) ? data_meta[0] : 0;
+}
+
+static __always_inline __maybe_unused void
+ctx_set_xfer(struct __sk_buff *ctx __maybe_unused, __u32 meta __maybe_unused)
+{
+	/* Only possible from XDP -> SKB. */
 }
 
 #endif /* __LIB_OVERLOADABLE_SKB_H_ */

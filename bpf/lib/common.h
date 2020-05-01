@@ -46,6 +46,9 @@
 # endif
 #endif
 
+/* XDP to SKB transferred meta data. */
+#define XFER_PKT_NO_SVC		1 /* Skip upper service handling. */
+
 /* These are shared with test/bpf/check-complexity.sh, when modifying any of
  * the below, that script should also be updated. */
 #define CILIUM_CALL_DROP_NOTIFY			1
@@ -555,14 +558,18 @@ struct lb6_key {
 
 /* See lb4_service comments */
 struct lb6_service {
-	__u32 backend_id;
+	union {
+		__u32 backend_id;	/* Backend ID in lb6_backends */
+		__u32 affinity_timeout;	/* In seconds, only for master svc */
+	};
 	__u16 count;
 	__u16 rev_nat_index;
 	__u8 external:1,	/* K8s External IPs */
 	     nodeport:1,	/* K8s NodePort service */
 	     local_scope:1,	/* K8s externalTrafficPolicy=Local */
 	     hostport:1,	/* K8s hostPort forwarding */
-	     reserved:4;
+	     affinity:1,	/* K8s sessionAffinity=clientIP */
+	     reserved:3;
 	__u8 pad[3];
 };
 
@@ -601,7 +608,10 @@ struct lb4_key {
 };
 
 struct lb4_service {
-	__u32 backend_id;	/* Backend ID in lb4_backends */
+	union {
+		__u32 backend_id;		/* Backend ID in lb4_backends */
+		__u32 affinity_timeout;		/* In seconds, only for master svc */
+	};
 	/* For the master service, count denotes number of service endpoints.
 	 * For service endpoints, zero. (Previously, legacy service ID)
 	 */
@@ -611,7 +621,8 @@ struct lb4_service {
 	     nodeport:1,	/* K8s NodePort service */
 	     local_scope:1,	/* K8s externalTrafficPolicy=Local */
 	     hostport:1,	/* K8s hostPort forwarding */
-	     reserved:4;
+	     affinity:1,	/* K8s sessionAffinity=clientIP */
+	     reserved:3;
 	__u8 pad[3];
 };
 
@@ -640,6 +651,46 @@ struct ipv4_revnat_entry {
 	__u16 rev_nat_index;
 };
 
+union lb4_affinity_client_id {
+	__u32 client_ip;
+	__u64 client_cookie; /* netns cookie */
+} __packed;
+
+struct lb4_affinity_key {
+	union lb4_affinity_client_id client_id;
+	__u16 rev_nat_id;
+	__u8 netns_cookie:1,
+	     reserved:7;
+	__u8 pad1;
+	__u32 pad2;
+} __packed;
+
+union lb6_affinity_client_id {
+	union v6addr client_ip;
+	__u64 client_cookie; /* netns cookie */
+} __packed;
+
+struct lb6_affinity_key {
+	union lb6_affinity_client_id client_id;
+	__u16 rev_nat_id;
+	__u8 netns_cookie:1,
+	     reserved:7;
+	__u8 pad1;
+	__u32 pad2;
+} __packed;
+
+struct lb_affinity_val {
+	__u64 last_used;
+	__u32 backend_id;
+	__u32 pad;
+} __packed;
+
+struct lb_affinity_match {
+	__u32 backend_id;
+	__u16 rev_nat_id;
+	__u16 pad;
+} __packed;
+
 struct ct_state {
 	__u16 rev_nat_index;
 	__u16 loopback:1,
@@ -667,6 +718,21 @@ static __always_inline int redirect_peer(int ifindex __maybe_unused,
 	return CTX_ACT_OK;
 #endif /* ENABLE_HOST_REDIRECT */
 }
+
+struct lpm_v4_key {
+	struct bpf_lpm_trie_key lpm;
+	__u8 addr[4];
+};
+
+struct lpm_v6_key {
+	struct bpf_lpm_trie_key lpm;
+	__u8 addr[16];
+};
+
+struct lpm_val {
+	/* Just dummy for now. */
+	__u8 flags;
+};
 
 #include "overloadable.h"
 

@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 .. _backport_process:
 
@@ -188,6 +188,14 @@ Via GitHub web interface
    can be done with the command printed out at the bottom of the output from
    the ``start-backport`` script above (``GITHUB_TOKEN`` needs to be set for
    this to work).
+
+Running the CI against the pull request
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To validate a cross-section of various tests against the PRs, backport PRs
+should be validated in the CI by running all CI targets. This can be triggered
+by adding a comment to the PR with exactly the text ``never-tell-me-the-odds``.
+The comment must not contain any other characters.
 
 After the backports are merged
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

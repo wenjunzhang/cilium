@@ -21,6 +21,7 @@ import (
 	"os/signal"
 
 	operatorMetrics "github.com/cilium/cilium/operator/metrics"
+	operatorOption "github.com/cilium/cilium/operator/option"
 	"github.com/cilium/cilium/pkg/components"
 	"github.com/cilium/cilium/pkg/ipam"
 	"github.com/cilium/cilium/pkg/k8s"
@@ -71,6 +72,7 @@ var (
 func initEnv() {
 	// Prepopulate option.Config with options from CLI.
 	option.Config.Populate()
+	operatorOption.Config.Populate()
 
 	// add hooks after setting up metrics in the option.Confog
 	logging.DefaultLogger.Hooks.Add(metrics.NewLoggingHook(components.CiliumOperatortName))
@@ -109,24 +111,23 @@ func kvstoreEnabled() bool {
 	}
 
 	return option.Config.IdentityAllocationMode == option.IdentityAllocationModeKVstore ||
-		option.Config.SyncK8sServices ||
-		option.Config.SyncK8sNodes
+		operatorOption.Config.SyncK8sServices ||
+		operatorOption.Config.SyncK8sNodes
 }
 
 func getAPIServerAddr() []string {
-	if option.Config.OperatorAPIServeAddr == "" {
+	if operatorOption.Config.OperatorAPIServeAddr == "" {
 		return []string{fmt.Sprintf("127.0.0.1:%d", apiServerPort), fmt.Sprintf("[::1]:%d", apiServerPort)}
 	}
-	return []string{option.Config.OperatorAPIServeAddr}
+	return []string{operatorOption.Config.OperatorAPIServeAddr}
 }
 
 func runOperator(cmd *cobra.Command) {
-
 	log.Infof("Cilium Operator %s", version.Version)
 	k8sInitDone := make(chan struct{})
 	go startServer(shutdownSignal, k8sInitDone, getAPIServerAddr()...)
 
-	if option.Config.EnableMetrics {
+	if operatorOption.Config.EnableMetrics {
 		operatorMetrics.Register()
 	}
 
@@ -153,7 +154,7 @@ func runOperator(cmd *cobra.Command) {
 	// etcd from reaching out kube-dns in EKS.
 	if option.Config.DisableCiliumEndpointCRD {
 		log.Infof("KubeDNS unmanaged pods controller disabled as %q option is set to 'disabled' in Cilium ConfigMap", option.DisableCiliumEndpointCRDName)
-	} else if option.Config.UnmanagedPodWatcherInterval != 0 {
+	} else if operatorOption.Config.UnmanagedPodWatcherInterval != 0 {
 		enableUnmanagedKubeDNSController()
 	}
 
@@ -198,7 +199,7 @@ func runOperator(cmd *cobra.Command) {
 	}
 
 	if kvstoreEnabled() {
-		if option.Config.SyncK8sServices {
+		if operatorOption.Config.SyncK8sServices {
 			startSynchronizingServices()
 		}
 
@@ -207,7 +208,7 @@ func runOperator(cmd *cobra.Command) {
 			"kvstore": option.Config.KVStore,
 			"address": option.Config.KVStoreOpt[fmt.Sprintf("%s.address", option.Config.KVStore)],
 		})
-		if option.Config.SyncK8sServices {
+		if operatorOption.Config.SyncK8sServices {
 			// If K8s is enabled we can do the service translation automagically by
 			// looking at services from k8s and retrieve the service IP from that.
 			// This makes cilium to not depend on kube dns to interact with etcd
@@ -269,7 +270,7 @@ func runOperator(cmd *cobra.Command) {
 			scopedLog.WithError(err).Fatal("Unable to setup kvstore")
 		}
 
-		if option.Config.SyncK8sNodes {
+		if operatorOption.Config.SyncK8sNodes {
 			if err := runNodeWatcher(nodeManager); err != nil {
 				log.WithError(err).Error("Unable to setup node watcher")
 			}
@@ -280,18 +281,22 @@ func runOperator(cmd *cobra.Command) {
 
 	switch option.Config.IdentityAllocationMode {
 	case option.IdentityAllocationModeCRD:
+		if !k8s.IsEnabled() {
+			log.Fatal("CRD Identity allocation mode requires k8s to be configured.")
+		}
+
 		startManagingK8sIdentities()
 
-		if option.Config.IdentityGCInterval != 0 {
+		if operatorOption.Config.IdentityGCInterval != 0 {
 			go startCRDIdentityGC()
 		}
 	case option.IdentityAllocationModeKVstore:
-		if option.Config.IdentityGCInterval != 0 {
+		if operatorOption.Config.IdentityGCInterval != 0 {
 			startKvstoreIdentityGC()
 		}
 	}
 
-	if option.Config.EnableCEPGC && option.Config.EndpointGCInterval != 0 {
+	if operatorOption.Config.EnableCEPGC && operatorOption.Config.EndpointGCInterval != 0 {
 		enableCiliumEndpointSyncGC()
 	}
 

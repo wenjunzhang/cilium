@@ -26,18 +26,19 @@ import (
 
 	eniTypes "github.com/cilium/cilium/pkg/aws/eni/types"
 	"github.com/cilium/cilium/pkg/cidr"
+	"github.com/cilium/cilium/pkg/ip"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 	"github.com/cilium/cilium/pkg/k8s"
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/informer"
 	k8sversion "github.com/cilium/cilium/pkg/k8s/version"
 	"github.com/cilium/cilium/pkg/lock"
-	"github.com/cilium/cilium/pkg/node"
+	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/trigger"
 
 	"github.com/sirupsen/logrus"
-	"k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
@@ -77,7 +78,8 @@ type nodeStore struct {
 	allocationPoolSize map[Family]int
 
 	// signal for completion of restoration
-	restoreFinished chan bool
+	restoreFinished  chan bool
+	restoreCloseOnce sync.Once
 
 	conf Configuration
 }
@@ -113,7 +115,7 @@ func newNodeStore(nodeName string, conf Configuration, owner Owner, k8sEventReg 
 	ciliumNodeStore := cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc)
 	ciliumNodeInformer := informer.NewInformerWithStore(
 		cache.NewListWatchFromClient(ciliumClient.CiliumV2().RESTClient(),
-			"ciliumnodes", v1.NamespaceAll, ciliumNodeSelector),
+			"ciliumnodes", corev1.NamespaceAll, ciliumNodeSelector),
 		&ciliumv2.CiliumNode{},
 		0,
 		cache.ResourceEventHandlerFuncs{
@@ -241,7 +243,24 @@ func (n *nodeStore) hasMinimumIPsInPool() (minimumReached bool, required, numAva
 
 		if n.conf.IPAMMode() == option.IPAMENI {
 			if vpcCIDR := deriveVpcCIDR(n.ownNode); vpcCIDR != nil {
-				n.conf.SetIPv4NativeRoutingCIDR(vpcCIDR)
+				if nativeCIDR := n.conf.IPv4NativeRoutingCIDR(); nativeCIDR != nil {
+					logFields := logrus.Fields{
+						"vpc-cidr":                   vpcCIDR.String(),
+						option.IPv4NativeRoutingCIDR: nativeCIDR.String(),
+					}
+
+					ranges4, _ := ip.CoalesceCIDRs([]*net.IPNet{nativeCIDR.IPNet, vpcCIDR.IPNet})
+					if len(ranges4) != 1 {
+						log.WithFields(logFields).Fatal("Native routing CIDR does not contain VPC CIDR.")
+					} else {
+						log.WithFields(logFields).Info("Ignoring autodetected VPC CIDR.")
+					}
+				} else {
+					log.WithFields(logrus.Fields{
+						"vpc-cidr": vpcCIDR.String(),
+					}).Info("Using autodetected VPC CIDR.")
+					n.conf.SetIPv4NativeRoutingCIDR(vpcCIDR)
+				}
 			} else {
 				minimumReached = false
 			}
@@ -414,7 +433,7 @@ type crdAllocator struct {
 // newCRDAllocator creates a new CRD-backed IP allocator
 func newCRDAllocator(family Family, c Configuration, owner Owner, k8sEventReg K8sEventRegister) Allocator {
 	initNodeStore.Do(func() {
-		sharedNodeStore = newNodeStore(node.GetName(), c, owner, k8sEventReg)
+		sharedNodeStore = newNodeStore(nodeTypes.GetName(), c, owner, k8sEventReg)
 	})
 
 	allocator := &crdAllocator{
@@ -623,5 +642,7 @@ func (a *crdAllocator) Dump() (map[string]string, string) {
 
 // RestoreFinished marks the status of restoration as done
 func (a *crdAllocator) RestoreFinished() {
-	close(a.store.restoreFinished)
+	a.store.restoreCloseOnce.Do(func() {
+		close(a.store.restoreFinished)
+	})
 }

@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 .. _admin_upgrade:
 
@@ -43,7 +43,7 @@ file.
         --set config.enabled=false \\
         --set operator.enabled=false \\
         > cilium-preflight.yaml
-      kubectl create cilium-preflight.yaml
+      kubectl create -f cilium-preflight.yaml
 
   .. group-tab:: Helm
 
@@ -68,7 +68,7 @@ file.
         --set global.k8sServiceHost=API_SERVER_IP \\
         --set global.k8sServicePort=API_SERVER_PORT \\
         > cilium-preflight.yaml
-      kubectl create cilium-preflight.yaml
+      kubectl create -f cilium-preflight.yaml
 
   .. group-tab:: Helm (kubeproxy-free)
 
@@ -434,6 +434,24 @@ Upgrading from >=1.7.0 to 1.8.y
       helm upgrade cilium --namespace=kube-system \\
       --set global.bpf.natMax=841429
 
+New ConfigMap Options
+~~~~~~~~~~~~~~~~~~~~~
+
+  * ``bpf-map-dynamic-size-ratio`` has been added to allow sizing of the TCP CT,
+    non-TCP CT, NAT and policy BPF maps based on the total system memory. This
+    option allows to specify a ratio (0.0-1.0) of total system memory to use for
+    these maps. On new installations, this ratio is set to 0.03 by default,
+    leading to 3% of the total system memory to be allocated for these maps. On
+    a node with 4 GiB of total system memory this ratio corresponds
+    approximately to the default BPF map sizes. A value of 0.0 will disable
+    sizing of the BPF maps based on system memory. Any BPF map sizes configured
+    manually using the ``ctTcpMax``, ``ctAnyMax``, ``natMax`` options will take
+    precedence over the dynamically determined value.
+
+    On upgrades of existing installations, this option is disable by default,
+    i.e. it is set to 0.0. Users wanting to use this feature need to enable it
+    explicitly in their `ConfigMap`, see section :ref:`upgrade_configmap`.
+
 Deprecated options
 ~~~~~~~~~~~~~~~~~~
 
@@ -444,6 +462,10 @@ Deprecated options
   1.6. The ``access-log`` option to log to a file has been removed.
 * ``--disable-k8s-services`` option from cilium-agent has been deprecated
   and will be removed in Cilium 1.9.
+* ``--tofqdns-enable-poller``: This option has been deprecated and will be
+  removed in Cilium 1.9
+* ``--tofqdns-enable-poller-events``: This option has been deprecated and will
+  be removed in Cilium 1.9
 
 Renamed Metrics
 ~~~~~~~~~~~~~~~
@@ -501,6 +523,10 @@ Removed options
 
 * ``enable-legacy-services``: This option was deprecated in Cilium 1.6 and is
   now removed.
+* The options ``container-runtime`` and ``container-runtime-endpoint`` were
+  deprecated in Cilium 1.7 and are now removed.
+* The ``conntrack-garbage-collector-interval`` option deprecated in Cilium 1.6
+  is now removed. Please use ``conntrack-gc-interval`` instead.
 
 Removed helm options
 ~~~~~~~~~~~~~~~~~~~~
@@ -627,17 +653,29 @@ New ConfigMap Options
 ~~~~~~~~~~~~~~~~~~~~~
 
   * ``enable-remote-node-identity`` has been added to enable a new identity
-    for remote cluster nodes. This allows for network policies that distinguish
-    between connections from host networking pods or other processes on the local
-    Kubernetes worker node from those on remote worker nodes.  This is important
-    because Kubernetes Network Policy dictates that network connectivity from the
-    local host must always be allowed, even for pods that have a default deny rule for
-    ingress connectivity.   This is so that network liveness and readiness
-    probes from kubelet will not be dropped by network policy.  Prior to 1.7.x,
-    Cilium achieved this by always allowing ingress host network connectivity from any
-    host in the cluster.  With 1.7 and ``enable-remote-node-identity=true``, Cilium
-    will only automatically allow connectivity from the local node, thereby providing
-    a better default security posture.
+    for remote cluster nodes and to associate all IPs of a node with that new
+    identity. This allows for network policies that distinguish between
+    connections from host networking pods or other processes on the local
+    Kubernetes worker node from those on remote worker nodes.
+
+    After enabling this option, all communication to and from non-local
+    Kubernetes nodes must be whitelisted with a ``toEntity`` or ``fromEntity``
+    rule listing the entity ``remote-node``. The existing entity ``cluster``
+    continues to work and now includes the entity ``remote-node``.  Existing
+    policy rules whitelisting ``host`` will only affect the local node going
+    forward. Existing CIDR-based rules to whitelist node IPs other than the
+    Cilium internal IP (IP assigned to the ``cilium_host`` interface), will no
+    longer take effect.
+
+    This is important because Kubernetes Network Policy dictates that network
+    connectivity from the local host must always be allowed, even for pods that
+    have a default deny rule for ingress connectivity.   This is so that
+    network liveness and readiness probes from kubelet will not be dropped by
+    network policy.  Prior to 1.7.x, Cilium achieved this by always allowing
+    ingress host network connectivity from any host in the cluster.  With 1.7
+    and ``enable-remote-node-identity=true``, Cilium will only automatically
+    allow connectivity from the local node, thereby providing a better default
+    security posture.
 
     The option is enabled by default for new deployments when generated via
     Helm, in order to gain the benefits of improved security. The Helm option
@@ -1209,7 +1247,7 @@ The cilium preflight manifest requires etcd support and can be built with:
       --set global.etcd.enabled=true \
       --set global.etcd.ssl=true \
       > cilium-preflight.yaml
-    kubectl create cilium-preflight.yaml
+    kubectl create -f cilium-preflight.yaml
 
 
 Example migration

@@ -32,6 +32,7 @@ cilium-agent [flags]
       --bpf-ct-timeout-service-any duration           Timeout for service entries in non-TCP CT table (default 1m0s)
       --bpf-ct-timeout-service-tcp duration           Timeout for established service entries in TCP CT table (default 6h0m0s)
       --bpf-fragments-map-max int                     Maximum number of entries in fragments tracking map (default 8192)
+      --bpf-map-dynamic-size-ratio float              Ratio (0.0-1.0) of total system memory to use for dynamic sizing of CT, NAT and policy BPF maps. Set to 0.0 to disable dynamic BPF map sizing (default: 0.0)
       --bpf-nat-global-max int                        Maximum number of entries for the global BPF NAT table (default 524288)
       --bpf-policy-map-max int                        Maximum number of entries in endpoint policy map (per endpoint) (default 16384)
       --bpf-root string                               Path to BPF filesystem
@@ -53,6 +54,7 @@ cilium-agent [flags]
       --disable-iptables-feeder-rules strings         Chains to ignore when installing feeder rules.
       --egress-masquerade-interfaces string           Limit egress masquerading to interface selector
       --enable-auto-protect-node-port-range           Append NodePort range to net.ipv4.ip_local_reserved_ports if it overlaps with ephemeral port range (net.ipv4.ip_local_port_range) (default true)
+      --enable-bpf-masquerade                         Masquerade packets from endpoints leaving the host with BPF instead of iptables
       --enable-endpoint-health-checking               Enable connectivity health checking between virtual endpoints (default true)
       --enable-endpoint-routes                        Use per endpoint routes instead of routing via cilium_host
       --enable-external-ips                           Enable k8s service externalIPs feature (requires enabling enable-node-port) (default true)
@@ -60,6 +62,7 @@ cilium-agent [flags]
       --enable-host-port                              Enable k8s hostPort mapping feature (requires enabling enable-node-port) (default true)
       --enable-host-reachable-services                Enable reachability of services for host applications (beta)
       --enable-hubble                                 Enable hubble server
+      --enable-ip-masq-agent                          Enable BPF ip-masq-agent
       --enable-ipsec                                  Enable IPSec support
       --enable-ipv4                                   Enable IPv4 support (default true)
       --enable-ipv4-fragment-tracking                 Enable IPv4 fragments tracking for L4-based lookups (default true)
@@ -71,6 +74,7 @@ cilium-agent [flags]
       --enable-node-port                              Enable NodePort type services by Cilium (beta)
       --enable-policy string                          Enable policy enforcement (default "default")
       --enable-remote-node-identity                   Enable use of remote node identity
+      --enable-session-affinity                       Enable support for service session affinity
       --enable-tracing                                Enable tracing while determining policy (debugging)
       --enable-well-known-identities                  Enable well-known identities for known Kubernetes components (default true)
       --enable-xt-socket-fallback                     Enable fallback for missing xt_socket module (default true)
@@ -102,6 +106,8 @@ cilium-agent [flags]
       --identity-change-grace-period duration         Time to wait before using new identity on endpoint identity change (default 5s)
       --install-iptables-rules                        Install base iptables rules for cilium to mainly interact with kube-proxy (and masquerading) (default true)
       --ip-allocation-timeout duration                Time after which an incomplete CIDR allocation is considered failed (default 2m0s)
+      --ip-masq-agent-config-path string              ip-masq-agent configuration file path (default "/etc/config/ip-masq-agent")
+      --ip-masq-agent-sync-period duration            ip-masq-agent configuration file synchronization period (default 1m0s)
       --ipam string                                   Backend to use for IPAM (default "hostscope-legacy")
       --ipsec-key-file string                         Path to IPSec key file
       --ipv4-node string                              IPv4 address of node (default "auto")
@@ -144,7 +150,8 @@ cilium-agent [flags]
       --mtu int                                       Overwrite auto-detected MTU of underlying network
       --nat46-range string                            IPv6 prefix to map IPv4 addresses to (default "0:0:0:0:0:FFFF::/96")
       --node-port-acceleration string                 BPF NodePort acceleration via XDP ("native", "none") (default "none")
-      --node-port-mode string                         BPF NodePort mode ("snat", "dsr", "hybrid") (default "hybrid")
+      --node-port-bind-protection                     Reject application bind(2) requests to service ports in the NodePort range (default true)
+      --node-port-mode string                         BPF NodePort mode ("snat", "dsr", "hybrid") (default "snat")
       --node-port-range strings                       Set the min/max NodePort port range (default [30000,32767])
       --policy-audit-mode                             Enable policy audit (non-drop) mode
       --policy-queue-size int                         size of queues for policy-related events (default 100)
@@ -165,11 +172,9 @@ cilium-agent [flags]
       --state-dir string                              Directory path to store runtime state (default "/var/run/cilium")
       --tofqdns-dns-reject-response-code string       DNS response code for rejecting DNS requests, available options are '[nameError refused]' (default "refused")
       --tofqdns-enable-dns-compression                Allow the DNS proxy to compress responses to endpoints that are larger than 512 Bytes or the EDNS0 option, if present (default true)
-      --tofqdns-enable-poller                         Enable proactive polling of DNS names in toFQDNs.matchName rules.
-      --tofqdns-enable-poller-events                  Emit DNS responses seen by the DNS poller as Monitor events, if the poller is enabled. (default true)
       --tofqdns-endpoint-max-ip-per-hostname int      Maximum number of IPs to maintain per FQDN name for each endpoint (default 50)
       --tofqdns-max-deferred-connection-deletes int   Maximum number of IPs to retain for expired DNS lookups with still-active connections (default 10000)
-      --tofqdns-min-ttl int                           The minimum time, in seconds, to use DNS data for toFQDNs policies. (default 600 when --tofqdns-enable-poller, 3600 otherwise)
+      --tofqdns-min-ttl int                           The minimum time, in seconds, to use DNS data for toFQDNs policies. (default 3600 )
       --tofqdns-pre-cache string                      DNS cache data at this path is preloaded on agent startup
       --tofqdns-proxy-port int                        Global port on which the in-agent DNS proxy should listen. Default 0 is a OS-assigned port.
       --tofqdns-proxy-response-max-delay duration     The maximum time the DNS proxy holds an allowed DNS response before sending it along. Responses are sent as soon as the datapath is updated with the new IP information. (default 100ms)

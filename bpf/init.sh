@@ -25,13 +25,13 @@ XDP_DEV=$7
 XDP_MODE=$8
 MTU=$9
 IPSEC=${10}
-MASQ=${11}
-ENCRYPT_DEV=${12}
-HOSTLB=${13}
-HOSTLB_UDP=${14}
-CGROUP_ROOT=${15}
-BPFFS_ROOT=${16}
-NODE_PORT=${17}
+ENCRYPT_DEV=${11}
+HOSTLB=${12}
+HOSTLB_UDP=${13}
+CGROUP_ROOT=${14}
+BPFFS_ROOT=${15}
+NODE_PORT=${16}
+NODE_PORT_BIND=${17}
 MCPU=${18}
 
 ID_HOST=1
@@ -335,13 +335,7 @@ function bpf_load()
 	NODE_MAC=$(ip link show $DEV | grep ether | awk '{print $2}')
 	NODE_MAC="{.addr=$(mac2array $NODE_MAC)}"
 
-	if [ "$WHERE" == "ingress" ]; then
-		OPTS_DIR="-DBPF_PKT_DIR=1"
-	else
-		OPTS_DIR="-DBPF_PKT_DIR=0"
-	fi
-
-	OPTS="${OPTS} ${OPTS_DIR} -DNODE_MAC=${NODE_MAC} -DCALLS_MAP=${CALLS_MAP}"
+	OPTS="${OPTS} -DNODE_MAC=${NODE_MAC} -DCALLS_MAP=${CALLS_MAP}"
 	bpf_compile $IN $OUT obj "$OPTS"
 	tc qdisc replace dev $DEV clsact || true
 	[ -z "$(tc filter show dev $DEV $WHERE | grep -v 'pref 1 bpf chain 0 $\|pref 1 bpf chain 0 handle 0x1')" ] || tc filter del dev $DEV $WHERE
@@ -366,7 +360,7 @@ function bpf_load_cgroups()
 	CGRP=$8
 	BPFMNT=$9
 
-	OPTS="${OPTS} ${OPTS_DIR} -DCALLS_MAP=${CALLS_MAP}"
+	OPTS="${OPTS} -DCALLS_MAP=${CALLS_MAP}"
 	bpf_compile $IN $OUT obj "$OPTS"
 
 	TMP_FILE="$BPFMNT/tc/globals/cilium_cgroups_$WHERE"
@@ -554,7 +548,7 @@ if [ "$MODE" = "direct" ] || [ "$MODE" = "ipvlan" ] || [ "$MODE" = "routed" ] ||
 		fi
 
 		bpf_load $NATIVE_DEV "$COPTS" "ingress" bpf_netdev.c bpf_netdev.o "from-netdev" $CALLS_MAP
-		if [ "$MASQ" = "true" ] || [ "$NODE_PORT" = "true" ]; then
+		if [ "$NODE_PORT" = "true" ]; then
 			bpf_load $NATIVE_DEV "$COPTS" "egress" bpf_netdev.c bpf_netdev.o "to-netdev" $CALLS_MAP
 		else
 			bpf_unload $NATIVE_DEV "egress"
@@ -592,7 +586,7 @@ if [ "$HOSTLB" = "true" ]; then
 	COPTS="-DLB_L3 -DLB_L4"
 	if [ "$IP6_HOST" != "<nil>" ] || [ "$IP4_HOST" != "<nil>" ] && [ -f /proc/sys/net/ipv6/conf/all/forwarding ]; then
 		bpf_load_cgroups "$COPTS" bpf_sock.c bpf_sock.o sockaddr connect6 from-sock6 $CALLS_MAP $CGROUP_ROOT $BPFFS_ROOT
-		if [ "$NODE_PORT" = "true" ]; then
+		if [ "$NODE_PORT" = "true" ] && [ "$NODE_PORT_BIND" = "true" ]; then
 			bpf_load_cgroups "$COPTS" bpf_sock.c bpf_sock.o sock post_bind6 post-bind-sock6 $CALLS_MAP $CGROUP_ROOT $BPFFS_ROOT
 		else
 			bpf_clear_cgroups $CGROUP_ROOT post_bind6
@@ -607,7 +601,7 @@ if [ "$HOSTLB" = "true" ]; then
 	fi
 	if [ "$IP4_HOST" != "<nil>" ]; then
 		bpf_load_cgroups "$COPTS" bpf_sock.c bpf_sock.o sockaddr connect4 from-sock4 $CALLS_MAP $CGROUP_ROOT $BPFFS_ROOT
-		if [ "$NODE_PORT" = "true" ]; then
+		if [ "$NODE_PORT" = "true" ] && [ "$NODE_PORT_BIND" = "true" ]; then
 			bpf_load_cgroups "$COPTS" bpf_sock.c bpf_sock.o sock post_bind4 post-bind-sock4 $CALLS_MAP $CGROUP_ROOT $BPFFS_ROOT
 		else
 			bpf_clear_cgroups $CGROUP_ROOT post_bind4

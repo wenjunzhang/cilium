@@ -1,4 +1,5 @@
 // Copyright 2020 Authors of Hubble
+// Copyright 2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,10 +21,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/cilium/cilium/api/v1/peer"
-	"github.com/cilium/cilium/pkg/hubble/api"
+	observerpb "github.com/cilium/cilium/api/v1/observer"
+	peerpb "github.com/cilium/cilium/api/v1/peer"
+	"github.com/cilium/cilium/pkg/api"
 	v1 "github.com/cilium/cilium/pkg/hubble/api/v1"
-	"github.com/cilium/cilium/pkg/hubble/observer"
 
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc/health"
@@ -33,9 +34,9 @@ import (
 // Options stores all the configuration values for the hubble server.
 type Options struct {
 	Listeners       map[string]net.Listener
-	HealthService   *health.Server
-	ObserverService *observer.GRPCServer
-	PeerService     *peer.PeerServer
+	HealthService   healthpb.HealthServer
+	ObserverService observerpb.ObserverServer
+	PeerService     peerpb.PeerServer
 }
 
 // Option customizes then configuration of the hubble server.
@@ -45,12 +46,12 @@ type Option func(o *Options) error
 // 'unix://' are assumed to be UNIX domain sockets, in which case appropriate
 // permissions are tentatively set and the group owner is set to socketGroup.
 // Otherwise, the address is assumed to be TCP.
-func WithListeners(addresses []string, socketGroup string) Option {
+func WithListeners(addresses []string) Option {
 	return func(o *Options) error {
 		var opt Option
 		for _, address := range addresses {
 			if strings.HasPrefix(address, "unix://") {
-				opt = WithUnixSocketListener(address, socketGroup)
+				opt = WithUnixSocketListener(address)
 			} else {
 				opt = WithTCPListener(address)
 			}
@@ -84,7 +85,7 @@ func WithTCPListener(address string) Option {
 // WithUnixSocketListener configures a unix domain socket listener with the
 // given file path. When the process runs in privileged mode, the file group
 // owner is set to socketGroup.
-func WithUnixSocketListener(path string, socketGroup string) Option {
+func WithUnixSocketListener(path string) Option {
 	return func(o *Options) error {
 		socketPath := strings.TrimPrefix(path, "unix://")
 		unix.Unlink(socketPath)
@@ -93,7 +94,7 @@ func WithUnixSocketListener(path string, socketGroup string) Option {
 			return err
 		}
 		if os.Getuid() == 0 {
-			if err := api.SetDefaultPermissions(socketPath, socketGroup); err != nil {
+			if err := api.SetDefaultPermissions(socketPath); err != nil {
 				return err
 			}
 		}
@@ -118,17 +119,17 @@ func WithHealthService() Option {
 }
 
 // WithObserverService configures the server to expose the given observer server service.
-func WithObserverService(svc observer.GRPCServer) Option {
+func WithObserverService(svc observerpb.ObserverServer) Option {
 	return func(o *Options) error {
-		o.ObserverService = &svc
+		o.ObserverService = svc
 		return nil
 	}
 }
 
 // WithPeerService configures the server to expose the given peer server service.
-func WithPeerService(svc peer.PeerServer) Option {
+func WithPeerService(svc peerpb.PeerServer) Option {
 	return func(o *Options) error {
-		o.PeerService = &svc
+		o.PeerService = svc
 		return nil
 	}
 }

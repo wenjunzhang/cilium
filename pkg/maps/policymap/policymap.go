@@ -22,6 +22,7 @@ import (
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/byteorder"
+	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/policy/trafficdirection"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
@@ -49,8 +50,9 @@ const (
 
 var (
 	// MaxEntries is the upper limit of entries in the per endpoint policy
-	// table
-	MaxEntries = 16384
+	// table. It is set by InitMapInfo(), but unit tests use the initial
+	// value below.
+	MaxEntries = defaults.PolicyMapEntries
 )
 
 type PolicyMap struct {
@@ -72,6 +74,9 @@ type PolicyKey struct {
 	TrafficDirection uint8  `align:"egress"`
 }
 
+// SizeofPolicyKey is the size of type PolicyKey.
+const SizeofPolicyKey = int(unsafe.Sizeof(PolicyKey{}))
+
 // PolicyEntry represents an entry in the BPF policy map for an endpoint. It must
 // match the layout of policy_entry in bpf/lib/common.h.
 // +k8s:deepcopy-gen=true
@@ -84,6 +89,9 @@ type PolicyEntry struct {
 	Packets   uint64 `align:"packets"`
 	Bytes     uint64 `align:"bytes"`
 }
+
+// SizeofPolicyEntry is the size of type PolicyEntry.
+const SizeofPolicyEntry = int(unsafe.Sizeof(PolicyEntry{}))
 
 // CallKey is the index into the prog array map.
 // +k8s:deepcopy-gen=true
@@ -290,9 +298,9 @@ func newMap(path string) *PolicyMap {
 			path,
 			mapType,
 			&PolicyKey{},
-			int(unsafe.Sizeof(PolicyKey{})),
+			SizeofPolicyKey,
 			&PolicyEntry{},
-			int(unsafe.Sizeof(PolicyEntry{})),
+			SizeofPolicyEntry,
 			MaxEntries,
 			flags, 0,
 			bpf.ConvertKeyValue,

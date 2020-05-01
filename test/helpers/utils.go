@@ -83,25 +83,19 @@ func MakeUID() string {
 	return fmt.Sprintf("%08x", randGen.Uint32())
 }
 
-// RenderTemplateToFile renders a text/template string into a target filename
-// with specific persmisions. Returns eturn an error if the template cannot be
-// validated or the file cannot be created.
-func RenderTemplateToFile(filename string, tmplt string, perm os.FileMode) error {
+// RenderTemplate renders a text/template string into a buffer.
+// Returns eturn an error if the template cannot be validated.
+func RenderTemplate(tmplt string) (*bytes.Buffer, error) {
 	t, err := template.New("").Parse(tmplt)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	content := new(bytes.Buffer)
 	err = t.Execute(content, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	err = ioutil.WriteFile(filename, content.Bytes(), perm)
-	if err != nil {
-		return err
-	}
-	return nil
+	return content, nil
 }
 
 // TimeoutConfig represents the configuration for the timeout of a command.
@@ -128,6 +122,23 @@ func (c *TimeoutConfig) Validate() error {
 // the timeout in config is reached. Returns an error if the timeout is
 // exceeded for body to execute successfully.
 func WithTimeout(body func() bool, msg string, config *TimeoutConfig) error {
+	err := RepeatUntilTrue(body, config)
+	if err != nil {
+		return fmt.Errorf("%s: %s", msg, err)
+	}
+
+	return nil
+}
+
+// RepeatUntilTrueDefaultTimeout calls RepeatUntilTrue with the default timeout
+// HelperTimeout
+func RepeatUntilTrueDefaultTimeout(body func() bool) error {
+	return RepeatUntilTrue(body, &TimeoutConfig{Timeout: HelperTimeout})
+}
+
+// RepeatUntilTrue repeatedly calls body until body returns true or the timeout
+// expires
+func RepeatUntilTrue(body func() bool, config *TimeoutConfig) error {
 	if err := config.Validate(); err != nil {
 		return err
 	}
@@ -161,7 +172,7 @@ func WithTimeout(body func() bool, msg string, config *TimeoutConfig) error {
 				go asyncBody(bodyChan)
 			}
 		case <-done:
-			return fmt.Errorf("Timeout reached: %s", msg)
+			return fmt.Errorf("%s timeout expired", config.Timeout)
 		}
 	}
 }
@@ -450,6 +461,7 @@ func CanRunK8sVersion(ciliumVersion, k8sVersionStr string) (bool, error) {
 // given log messages contains an entry from the blacklist (map key) AND
 // does not contain ignore messages (map value).
 func failIfContainsBadLogMsg(logs string, blacklist map[string][]string) {
+	nFailures := 0
 	for _, msg := range strings.Split(logs, "\n") {
 		for fail, ignoreMessages := range blacklist {
 			if strings.Contains(msg, fail) {
@@ -462,10 +474,13 @@ func failIfContainsBadLogMsg(logs string, blacklist map[string][]string) {
 				}
 				if !ok {
 					fmt.Fprintf(CheckLogs, "⚠️  Found a %q in logs\n", fail)
-					Fail(fmt.Sprintf("Found a %q in Cilium Logs", fail))
+					nFailures++
 				}
 			}
 		}
+	}
+	if nFailures > 0 {
+		Fail(fmt.Sprintf("Found %d Cilium logs matching list of errors that must be investigated", nFailures))
 	}
 }
 
