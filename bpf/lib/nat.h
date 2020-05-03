@@ -500,7 +500,7 @@ static __always_inline __maybe_unused int snat_v4_process(struct __ctx_buff *ctx
 						const struct ipv4_nat_target *target,
 						bool from_endpoint)
 {
-	struct icmphdr icmphdr __align_stack_8;
+	struct icmphdr icmphdr;
 	struct ipv4_nat_entry *state, tmp;
 	struct ipv4_ct_tuple tuple = {};
 	void *data, *data_end;
