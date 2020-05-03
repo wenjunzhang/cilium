@@ -1,0 +1,14 @@
+name: Coccicheck
+
+on:
+  - pull_request
+
+jobs:
+    coccicheck:
+        name: Coccicheck
+        runs-on: ubuntu-18.04
+        steps:
+            - uses: actions/checkout@v1
+            - uses: docker://cilium/coccicheck:latest
+              with:
+                entrypoint: make -C bpf coccicheck
